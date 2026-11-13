@@ -1,0 +1,18 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Day 1 verify and review",
+			"type": "shell",
+			"command": "cmd.exe",
+			"args": [
+				"/d",
+				"/s",
+				"/c",
+				"npm.cmd test --prefix server && npm.cmd run build --prefix client && git status --short --branch && git remote"
+			],
+			"isBackground": false,
+			"problemMatcher": []
+		}
+	]
+}
