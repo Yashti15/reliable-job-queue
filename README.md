@@ -13,17 +13,44 @@ The project includes a React/Vite monitoring dashboard, Express API, MongoDB-bac
 
 ## Quick demo with Docker Compose
 
+Before starting the stack, copy `.env.example` to a root-level `.env` and set
+`MONGO_ROOT_USERNAME`, `MONGO_ROOT_PASSWORD`, and `AUTH_JWT_SECRET`. Use an
+alphanumeric MongoDB username and a URL-safe base64url password so they can be
+embedded in the internal MongoDB URI without escaping. Generate random values
+locally with Node.js:
+
+```powershell
+node -e "console.log(require('node:crypto').randomBytes(32).toString('base64url'))"
+node -e "console.log(require('node:crypto').randomBytes(48).toString('base64url'))"
+```
+
+Use the first output for the MongoDB password and the second for
+`AUTH_JWT_SECRET`. The API refuses to start without a JWT secret of at least
+32 bytes, and Compose refuses to start if any required setting is empty. Keep
+the root `.env` private and untracked; never put real credentials in
+`.env.example`.
+
+The Compose stack initializes MongoDB root authentication, uses an
+authenticated connection for both API and worker, and binds MongoDB, API, and
+UI ports to `127.0.0.1`. It is a local development/demo setup, not a
+production deployment. On an existing MongoDB data volume initialized without
+authentication, setting these variables does not create a user retroactively;
+back up the data and perform a deliberate local authentication migration rather
+than deleting the volume.
+
 Run the complete multi-process stack (MongoDB, API, Worker, and Nginx-served UI) with a shared private storage volume:
 
 ```bash
 docker compose up --build
 ```
 
-In another terminal, populate the demo account and sample jobs (PDF report, Sharp thumbnail, mocked email, and dead-letter queue recovery):
+In another terminal, populate the demo account and sample jobs (PDF report, Sharp thumbnail, mocked email, and dead-letter queue recovery). Run the seed command inside the API container so it uses the authenticated `MONGODB_URI` configured by Compose, rather than a host `server/.env`:
 
 ```bash
-npm run demo:seed
+docker compose exec api npm run demo:seed
 ```
+
+The seeded account and jobs are demonstration data. Report figures and sample failure details are fictional/synthetic, not measured project metrics or production outcomes.
 
 Open `http://localhost:5173` in your browser:
 * **Email**: `demo@example.test`
@@ -62,6 +89,8 @@ Open `http://localhost:5173` in your browser:
 The client uses `/api` by default, which Vite proxies to `http://localhost:5000`; Vite also proxies the Socket.IO endpoint. To use another API base URL, copy `client/.env.example` to `client/.env.local` and set `VITE_API_BASE_URL` (for example `http://localhost:5000/api`). Only public API URLs belong in `VITE_` variables; never place backend credentials there.
 
 8. Open the Vite URL shown in the client terminal. QueueOps shows analytics, worker status, job lists/details, job creation, and dead-letter replay. Socket.IO events trigger REST refetches; MongoDB and the REST API remain authoritative.
+
+For standalone local development, run `npm run demo:seed` from the repository root after configuring `server/.env`. The host-side seed command reads `MONGODB_URI` from `server/.env`; it does not use the root Compose `.env`. Verify that it targets the intended development database, never production.
 
 The API reads `MONGODB_URI` from `server/.env` and only starts listening after a successful database connection. If the URI is missing or the connection fails, startup exits with a safe diagnostic that does not print the connection string.
 

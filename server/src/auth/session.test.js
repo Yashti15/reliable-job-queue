@@ -13,6 +13,10 @@ afterEach(() => {
 })
 
 test('session configuration requires a strong secret', () => {
+  delete process.env.AUTH_JWT_SECRET
+  delete process.env.CLIENT_ORIGIN
+  assert.throws(validateAuthConfiguration, /at least 32 bytes/)
+
   process.env.AUTH_JWT_SECRET = 'short'
   delete process.env.CLIENT_ORIGIN
   assert.throws(validateAuthConfiguration, /at least 32 bytes/)

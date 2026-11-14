@@ -299,3 +299,10 @@ Mean queue latency is measured from persisted creation time to claim, after the 
 - Worker crash recovery is lease-based. A running handler may continue an external side effect after lease loss; stale queue persistence is rejected, but an email may be duplicated if provider idempotency is unavailable or expires.
 - Local file storage is not replicated. API and workers on separate machines need a shared private filesystem. Orphans after abrupt process/filesystem failures and retention cleanup remain operational responsibilities.
 - The benchmark is a local microbenchmark, not a load test of production topology or real handler cost. No external penetration test was performed.
+
+## Docker Compose security hardening
+
+- Bound the Compose MongoDB, API, and UI ports to loopback only.
+- Removed the fixed JWT signing secret. Compose now requires a locally supplied `AUTH_JWT_SECRET`, and API startup rejects missing or shorter-than-32-byte secrets.
+- Enabled MongoDB root authentication using locally supplied Compose environment variables; the API, worker, and MongoDB healthcheck authenticate against the local database.
+- Updated `.env.example` and the README with local secret-generation and setup guidance. No credentials were added to tracked files.
