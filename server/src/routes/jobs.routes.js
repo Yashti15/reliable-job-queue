@@ -480,7 +480,9 @@ export function createJobsRouter(
       response.set({
         'Content-Type': asset.mediaType,
         'Content-Length': content.length,
-        'Content-Disposition': `attachment; filename="${asset.fileName}"`,
+        'Content-Disposition': `${asset.mediaType.startsWith('image/')
+          ? 'inline'
+          : 'attachment'}; filename="${asset.fileName}"`,
         'X-Content-Type-Options': 'nosniff',
         'Cache-Control': 'private, no-store',
       })

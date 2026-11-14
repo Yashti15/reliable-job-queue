@@ -89,6 +89,37 @@ describe(
       assert.equal(await QueueEvent.countDocuments({ name: 'job:created' }), 1)
     })
 
+    test('job state remains available after the API process restarts', async () => {
+      const created = await fetch(`${baseUrl}/api/jobs`, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ type: 'restart-test', payload: { retained: true } }),
+      })
+      assert.equal(created.status, 201)
+      const job = (await created.json()).data.job
+
+      await new Promise((resolve, reject) =>
+        server.close((error) => (error ? reject(error) : resolve())),
+      )
+      const app = express()
+      app.use(express.json())
+      app.use('/api/jobs', (request, _response, next) => {
+        request.authUser = { _id: testOwnerId }
+        next()
+      })
+      app.use('/api/jobs', createJobsRouter(Job))
+      server = app.listen(0, '127.0.0.1')
+      await new Promise((resolve, reject) => {
+        server.once('listening', resolve)
+        server.once('error', reject)
+      })
+      baseUrl = `http://127.0.0.1:${server.address().port}`
+
+      const restored = await fetch(`${baseUrl}/api/jobs/${job._id}`)
+      assert.equal(restored.status, 200)
+      assert.equal((await restored.json()).data.job.payload.retained, true)
+    })
+
     test('concurrent replay requests produce exactly one replay transition', async () => {
       const job = await Job.create({
         type: 'test',

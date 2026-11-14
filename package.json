@@ -1,0 +1,15 @@
+{
+  "name": "reliable-job-queue",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start:api": "npm start --prefix server",
+    "start:worker": "npm run worker --prefix server",
+    "start:client": "npm run dev --prefix client",
+    "demo:seed": "npm run demo:seed --prefix server",
+    "cleanup:artifacts": "npm run cleanup:artifacts --prefix server",
+    "test:server": "npm test --prefix server",
+    "build:client": "npm run build --prefix client"
+  }
+}

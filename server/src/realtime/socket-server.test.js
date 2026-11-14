@@ -46,7 +46,7 @@ function createEventModel() {
   }
 }
 
-test('event bridge emits newly persisted records and stops polling cleanly', async () => {
+test('event bridge emits newly persisted records and stops polling cleanly', { timeout: 5000 }, async () => {
   const model = createEventModel()
   const emitted = []
   const io = {
@@ -78,7 +78,7 @@ test('event bridge emits newly persisted records and stops polling cleanly', asy
   ])
 })
 
-test('Socket.IO authenticates clients and isolates events in server-controlled user rooms', async (context) => {
+test('Socket.IO authenticates clients and isolates events in server-controlled user rooms', { timeout: 10_000 }, async (context) => {
   const model = createEventModel()
   const httpServer = createServer()
   const { io, bridge } = createSocketServer(httpServer, {
@@ -97,12 +97,14 @@ test('Socket.IO authenticates clients and isolates events in server-controlled u
   const clientA = createSocketClient(url, {
     extraHeaders: { Cookie: 'rq_session=user-a' },
     reconnection: false,
+    timeout: 3000,
   })
   const clientB = createSocketClient(url, {
     extraHeaders: { Cookie: 'rq_session=user-b' },
     reconnection: false,
+    timeout: 3000,
   })
-  const rejectedClient = createSocketClient(url, { reconnection: false })
+  const rejectedClient = createSocketClient(url, { reconnection: false, timeout: 3000 })
   context.after(async () => {
     clientA.disconnect()
     clientB.disconnect()
@@ -111,8 +113,11 @@ test('Socket.IO authenticates clients and isolates events in server-controlled u
     await new Promise((resolve) => io.close(resolve))
   })
 
-  await Promise.all([once(clientA, 'connect'), once(clientB, 'connect')])
-  const failedHandshake = once(rejectedClient, 'connect_error')
+  await Promise.all([
+    once(clientA, 'connect', { signal: AbortSignal.timeout(4000) }),
+    once(clientB, 'connect', { signal: AbortSignal.timeout(4000) }),
+  ])
+  const failedHandshake = once(rejectedClient, 'connect_error', { signal: AbortSignal.timeout(4000) })
   assert.match((await failedHandshake)[0].message, /Authentication required/)
 
   clientA.emit('join', 'user:user-b')

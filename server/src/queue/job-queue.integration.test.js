@@ -63,6 +63,39 @@ describe(
       assert.ok(successfulClaims[0].claimToken.length > 0)
     })
 
+    test('many workers racing to claim and finish one job produce one valid outcome', async () => {
+      const job = await Job.create({
+        type: 'test',
+        payload: {},
+        status: 'pending',
+        runAt: new Date(Date.now() - 1000),
+      })
+      const workers = Array.from({ length: 16 }, (_, index) => `race-worker-${index}`)    
+      const claims = await Promise.all(workers.map((workerId) => claimNextJob(workerId)))
+      const successfulClaims = claims.filter(Boolean)
+
+      assert.equal(successfulClaims.length, 1)
+      const claim = successfulClaims[0]
+      const outcomes = await Promise.all([
+        completeJob(claim, claim.workerId, new Date(), async () => true),
+        failJob(claim, claim.workerId, new Error('racing failure'), {
+          random: () => 0,
+          eventPublisher: async () => true,
+        }),
+      ])
+      assert.equal(outcomes.filter(Boolean).length, 1)
+
+      const persisted = await Job.findById(job._id).lean()
+      assert.ok(['completed', 'pending'].includes(persisted.status))
+      assert.equal(persisted.attempts, persisted.status === 'completed' ? 0 : 1)
+      assert.equal(persisted.claimToken, undefined)
+      if (persisted.status === 'completed') {
+        assert.equal(persisted.workerId, claim.workerId)
+      } else {
+        assert.equal(persisted.workerId, undefined)
+      }
+    })
+
     test('heartbeat extends an unexpired lease and rejects expired or stale claims', async () => {
       const baseTime = new Date()
       const created = await Job.create({ type: 'test', payload: {}, runAt: baseTime })
@@ -88,6 +121,54 @@ describe(
         }),
         null,
       )
+    })
+
+    test('heartbeat racing lease recovery preserves exactly one owner', async () => {
+      const baseTime = new Date()
+      const created = await Job.create({
+        type: 'test',
+        payload: {},
+        runAt: baseTime,
+        maxAttempts: 3,
+      })
+      const leaseDurationMs = 1000
+      const claimed = await claimNextJob('heartbeat-race-owner', {
+        now: baseTime,
+        leaseDurationMs,
+      })
+      const expiresAt = claimed.leaseExpiresAt
+      const heartbeatAt = new Date(expiresAt.getTime() - 1)
+      const recoveryAt = new Date(expiresAt.getTime())
+
+      const [renewed, recovered] = await Promise.all([
+        renewLease(claimed, 'heartbeat-race-owner', {
+          now: heartbeatAt,
+          leaseDurationMs,
+        }),
+        claimNextJob('lease-recovery-owner', {
+          now: recoveryAt,
+          leaseDurationMs,
+          eventPublisher: async () => true,
+        }),
+      ])
+
+      const persisted = await Job.findById(created._id).lean()
+      if (renewed) {
+        assert.equal(recovered, null)
+        assert.equal(persisted.workerId, 'heartbeat-race-owner')
+        assert.equal(persisted.claimToken, claimed.claimToken)
+        assert.equal(persisted.attempts, 0)
+      } else {
+        assert.ok(recovered)
+        assert.equal(recovered.workerId, 'lease-recovery-owner')
+        assert.notEqual(recovered.claimToken, claimed.claimToken)
+        assert.equal(persisted.workerId, 'lease-recovery-owner')
+        assert.equal(persisted.attempts, 1)
+        assert.equal(
+          await completeJob(claimed, 'heartbeat-race-owner', recoveryAt),
+          null,
+        )
+      }
     })
 
     test('claims high priority first and older jobs first within a priority', async () => {

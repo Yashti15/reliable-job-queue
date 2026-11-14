@@ -24,6 +24,7 @@ export function createWorker({
   heartbeatIntervalMs = 10_000,
   onStateChange = async () => {},
   now = () => new Date(),
+  monotonicNow = () => performance.now(),
   setTimeoutFn = setTimeout,
   clearTimeoutFn = clearTimeout,
 } = {}) {
@@ -146,6 +147,7 @@ export function createWorker({
       let result
       let handlerError
       let handlerFailed = false
+      const executionStartedAt = monotonicNow()
       const heartbeat = startHeartbeat(job)
       try {
         const handler = getHandler(job.type)
@@ -165,6 +167,10 @@ export function createWorker({
         handlerFailed = true
         handlerError = error
       }
+      const elapsedMs = monotonicNow() - executionStartedAt
+      const executionDurationMs = Number.isFinite(elapsedMs)
+        ? Math.max(0, Math.round(elapsedMs))
+        : undefined
 
       await heartbeat.stop()
       if (heartbeat.leaseLost) {
@@ -187,6 +193,9 @@ export function createWorker({
               jobId: String(job._id),
               workerId,
               errorName: safeErrorName(handlerError),
+              ...(executionDurationMs !== undefined
+                ? { executionDurationMs }
+                : {}),
               attempts: failedJob.attempts,
               status: failedJob.status,
             })
@@ -222,6 +231,9 @@ export function createWorker({
           jobId: String(job._id),
           workerId,
           resultType: typeof result?.type === 'string' ? result.type : 'success',
+          ...(executionDurationMs !== undefined
+            ? { executionDurationMs }
+            : {}),
         })
       } catch (error) {
         logger.error('Could not record job completion.', {

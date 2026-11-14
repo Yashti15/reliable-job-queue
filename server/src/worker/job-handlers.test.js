@@ -227,12 +227,45 @@ test('email sender reserves owner-scoped execution quota before contacting provi
   assert.equal(quotaRequest.usage, 'execution')
 })
 
+test('email handler safely mocks acceptance in demo mode without contacting provider', async () => {
+  let fetchCalled = false
+  const handler = createEmailHandler({
+    getConfig: () => ({ timeoutMs: 1000 }),
+    getPolicy: () => ({
+      enabled: true,
+      configured: true,
+      isDemoMode: true,
+      allowedRecipients: ['@example.test'],
+    }),
+    fetchImpl: async () => {
+      fetchCalled = true
+      throw new Error('fetchImpl must never be called in demo mode')
+    },
+  })
+
+  const result = await handler(
+    { to: 'demo@example.test', subject: 'Demo Email', text: 'Hello from demo' },
+    { job: emailJob },
+  )
+
+  assert.equal(fetchCalled, false)
+  assert.equal(result.type, 'email')
+  assert.equal(result.provider, 'resend')
+  assert.equal(result.status, 'accepted')
+  assert.match(result.providerMessageId, /^demo_/)
+})
+
 test('PDF handler generates a non-empty PDF with owner-scoped output and reuses it', async (context) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'rq-pdf-test-'))
   context.after(() => rm(root, { recursive: true, force: true }))
   const store = createFileStore({ root })
   const assets = createAssetModel()
-  const handler = createPdfHandler({ AssetModel: assets.model, store })
+  const generatedAt = new Date('2026-11-14T09:00:00.000Z')
+  const handler = createPdfHandler({
+    AssetModel: assets.model,
+    store,
+    now: () => generatedAt,
+  })
   const payload = {
     title: 'Weekly queue report',
     sections: [{ heading: 'Completed', paragraphs: ['Twelve jobs completed successfully.'] }],
@@ -243,6 +276,11 @@ test('PDF handler generates a non-empty PDF with owner-scoped output and reuses 
   const buffer = await store.load(ownerId, assets.records[0].storageKey, 'outputs')
   assert.equal(buffer.subarray(0, 5).toString(), '%PDF-')
   assert.ok(buffer.length > 500)
+  assert.ok(
+    buffer.toString('latin1').includes(
+      Buffer.from(generatedAt.toISOString()).toString('hex'),
+    ),
+  )
   assert.equal(artifact.mediaType, 'application/pdf')
 
   const repeated = await handler(payload, { job: { _id: jobId, ownerId } })
@@ -262,6 +300,36 @@ test('PDF handler rejects invalid report content without writing a file', async 
   await assert.rejects(
     handler({ title: '../unsafe', sections: [] }, { job: { _id: jobId, ownerId } }),
     { name: 'InvalidJobPayloadError' },
+  )
+  assert.equal(assets.records.length, 0)
+})
+
+test('PDF handler reports storage outages without exposing filesystem errors', async () => {
+  const assets = createAssetModel()
+  const handler = createPdfHandler({
+    AssetModel: assets.model,
+    store: {
+      async save() {
+        throw new Error('private disk mount and internal path details')
+      },
+      async remove() {},
+    },
+  })
+
+  await assert.rejects(
+    handler(
+      {
+        title: 'Storage outage report',
+        sections: [{ heading: 'Summary', paragraphs: ['Content'] }],
+      },
+      { job: { _id: jobId, ownerId } },
+    ),
+    (error) => {
+      assert.equal(error.name, 'PdfStorageError')
+      assert.equal(error.message, 'Could not save the generated PDF report.')
+      assert.doesNotMatch(error.message, /private disk mount/)
+      return true
+    },
   )
   assert.equal(assets.records.length, 0)
 })

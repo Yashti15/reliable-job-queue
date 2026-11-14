@@ -238,7 +238,7 @@ Replace simulated worker behavior with actual email submission, PDF generation, 
 ### Changes
 
 - Replaced the simulated email handler with a server-only Resend HTTP integration, validated email/PDF/image payloads, bounded timeouts, safe provider errors, and acceptance-only result metadata.
-- Added real PDFKit report output and Sharp resize/convert/thumbnail handlers. Uploaded source images are validated as actual JPEG/PNG/WebP bytes; arbitrary paths and remote URLs are not accepted.
+- Added real PDFKit report output with a UTC generation timestamp and Sharp resize/convert/thumbnail handlers. Uploaded source images are validated as actual JPEG/PNG/WebP bytes; arbitrary paths and remote URLs are not accepted. Processed images render as authenticated inline previews; PDF downloads remain attachments.
 - Added authenticated/CSRF-protected raw image uploads and owner/job-checked artifact downloads. Output bytes live under private owner-scoped filesystem directories; MongoDB stores only bounded metadata.
 - Persisted handler result metadata only within the existing conditional atomic completion update. Added per-job unique output metadata and reuse for retry/replay protection; replay clears prior result.
 - Extended the dashboard job form for all three job types and exposed safe result metadata/private artifact downloads on job details.
@@ -259,3 +259,43 @@ Replace simulated worker behavior with actual email submission, PDF generation, 
 - No email was sent and no Atlas/production database was used. Resend credentials were not configured, so actual external email delivery was not attempted.
 - Dependency CVE assessment for the resolved server npm dependency set reported no known vulnerabilities.
 - `git diff --check` — passed.
+
+## Day 11 advanced reliability and fault-tolerance verification
+
+### Changes
+
+- Added real-MongoDB concurrency tests for 16 workers racing to claim one job, completion racing a failure update, and heartbeat renewal racing lease recovery. Assertions verify one persisted owner/outcome, token changes on recovery, and single attempt increments.
+- Added a worker-restart failure-injection test: handler work succeeds but completion persistence throws; the job remains durably processing, expires, is reclaimed by a second worker, and completes with the abandoned execution counted once.
+- Added API restart persistence, temporary MongoDB polling/heartbeat failure, and lease-expiry-during-handler tests. The recovery worker completes the reclaimed job while the stale handler's result is not persisted.
+- Added safe monotonic handler-duration fields to worker completion/failure logs. Logs continue to omit payloads, credentials, JWTs, and claim tokens.
+- Added a local-only REST enqueue and concurrent claim/completion benchmark. It uses the process-specific isolated test-database helper and fails closed for non-loopback MongoDB URIs.
+- Added a PDF-storage outage test verifying filesystem details are not exposed through the job-safe error.
+
+### Measured benchmark
+
+Run on 2026-11-14 using Node.js v25.6.0 on Windows x64 (22 logical processors, 15.5 GiB reported memory) with a local MongoDB test server. MongoDB server version was not captured. Each cell was run once; treat these as a machine-specific baseline, not a statistically stable or production-capacity result. Submission concurrency was 16. The workload submitted through the REST router, then drained using the stated number of concurrent claim/completion loops; it did not execute real job handlers.
+
+| Jobs | Workers | Submit jobs/s | Submit request p95 ms | Claim + completion jobs/s | Mean queue latency ms | Completion write p95 ms | Completed |
+|---:|---:|---:|---:|---:|---:|---:|---:|
+| 100 | 1 | 260.21 | 138.07 | 119.73 | 569.12 | 2.16 | 100 |
+| 100 | 4 | 509.84 | 37.55 | 140.70 | 457.37 | 6.20 | 100 |
+| 500 | 1 | 304.08 | 65.81 | 90.70 | 3579.37 | 2.84 | 500 |
+| 500 | 4 | 361.34 | 61.23 | 172.76 | 2121.57 | 4.84 | 500 |
+
+Mean queue latency is measured from persisted creation time to claim, after the entire submission batch is enqueued; it includes batch-submission wait. Completion write p95 is only the conditional completion update duration. The small sample and local database make these figures unsuitable for comparing hardware or forecasting deployment capacity.
+
+### Validation
+
+- Complete backend suite: **114 passed, 0 failed, 0 skipped** using `MONGODB_TEST_URI=mongodb://127.0.0.1:27017/reliable_job_queue_test`; integration helper created/dropped isolated local `_test` databases.
+- Concurrency, replay, API restart, and worker recovery integration subset: **30 passed, 0 failed, 0 skipped**.
+- Handler, storage outage, worker observability, and artifact route tests: **29 passed, 0 failed, 0 skipped** across the focused runs.
+- Frontend production build: passed. No frontend test runner is configured.
+- Local benchmark: all four scenarios completed their expected job count (100/100, 100/100, 500/500, 500/500); reported metrics above are from the latest run.
+- `git diff --check`: passed.
+
+### Guarantees and limits
+
+- MongoDB atomic filters ensure only one valid claim/transition wins; the tests exercise actual concurrent database operations. They do not prove behavior under every network partition, clock skew, storage hardware failure, or MongoDB topology.
+- Worker crash recovery is lease-based. A running handler may continue an external side effect after lease loss; stale queue persistence is rejected, but an email may be duplicated if provider idempotency is unavailable or expires.
+- Local file storage is not replicated. API and workers on separate machines need a shared private filesystem. Orphans after abrupt process/filesystem failures and retention cleanup remain operational responsibilities.
+- The benchmark is a local microbenchmark, not a load test of production topology or real handler cost. No external penetration test was performed.

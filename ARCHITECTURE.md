@@ -25,6 +25,68 @@ The planned reliability flow is:
 
 The dashboard uses REST for authoritative reads and Socket.IO for lifecycle notifications. Operational analytics and worker liveness are backed by MongoDB.
 
+### System Component Topology
+
+```mermaid
+flowchart TD
+  subgraph ClientTier["Client Tier"]
+    UI["React 19 Dashboard<br/>(Tailwind CSS + Vite)"]
+  end
+
+  subgraph APITier["Express API Server"]
+    Router["REST API Router<br/>(Auth, Jobs, Analytics, Uploads)"]
+    Bridge["Realtime Bridge<br/>(Socket.IO + Event Tailer)"]
+  end
+
+  subgraph DatabaseTier["Database Tier (MongoDB)"]
+    JobsColl[("Jobs Collection<br/>• Atomic claims & leases<br/>• Compound idempotency index")]
+    EventsColl[("Queue Events Collection<br/>• Capped 24h retention")]
+    AssetsColl[("Job Assets Collection<br/>• Metadata only")]
+  end
+
+  subgraph WorkerTier["Background Worker Engine"]
+    Worker["Worker Loop (Polling)"]
+    Heartbeat["Heartbeat Manager<br/>(Lease renewal)"]
+    Handlers["Handler Registry<br/>• send_email (Resend / Mock)<br/>• generate_pdf (PDFKit)<br/>• process_image (Sharp)"]
+  end
+
+  subgraph StorageTier["Private File Storage"]
+    Storage[("server/storage/<br/>• users/:ownerId/uploads<br/>• users/:ownerId/outputs")]
+  end
+
+  UI -- "REST + Session Cookie + CSRF" --> Router
+  UI <.. "Real-time updates" ..> Bridge
+  Router -- "Enqueue pending jobs" --> JobsColl
+  Bridge -- "Tail new events" --> EventsColl
+  Worker -- "Atomic findOneAndUpdate() claim" --> JobsColl
+  Heartbeat -- "Periodic lease extension" --> JobsColl
+  Worker --> Handlers
+  Handlers -- "PDF / Transformed images" --> Storage
+  Handlers -- "Save asset metadata" --> AssetsColl
+  Router -- "Stream authenticated artifacts" --> Storage
+```
+
+### Job Lifecycle State Machine
+
+```mermaid
+stateDiagram-v2
+  [*] --> pending: POST /api/jobs
+  pending --> cancelled: DELETE /api/jobs/:id (owner only)
+  pending --> processing: Atomic claimNextJob()<br/>(High > Normal > Low priority)
+
+  processing --> completed: Handler Success<br/>(atomic conditional write)
+  processing --> pending: Retryable failure & attempts < maxAttempts<br/>(exponential backoff + jitter)
+  processing --> dead: Failure & attempts >= maxAttempts<br/>(Dead-Letter State)
+
+  processing --> processing: Worker crash / lease expired<br/>(reclaimed by peer worker, attempts++)
+  processing --> dead: Lease expired & attempts >= maxAttempts<br/>(Dead-Letter State)
+
+  dead --> pending: POST /api/jobs/:id/replay<br/>(reset attempts, preserve key & audit log)
+
+  completed --> [*]
+  cancelled --> [*]
+```
+
 ## Day 2 job persistence
 
 The `Job` model stores job input, status, priority, attempt limits, scheduled time, optional error/idempotency metadata, and Mongoose timestamps. A partial unique index on `{ ownerId, idempotencyKey }` enforces per-tenant uniqueness only for provided idempotency keys on owned jobs. Status/creation and status/run-time indexes support listing and future scheduling queries.
@@ -54,6 +116,37 @@ A lease is temporary ownership of a processing job. The worker starts with a lea
 Claiming checks priority buckets in `high`, `normal`, `low` order. Within each bucket, a due pending job can be claimed, or a processing job whose lease has expired can be reclaimed. The reclaim is one `findOneAndUpdate()` that assigns a new worker ID, token, claim time, and lease expiration while incrementing `attempts` exactly once for the abandoned execution. Concurrent workers cannot both match the same old lease. Expired executions that reach `maxAttempts` are atomically marked dead instead of reclaimed.
 
 The claim token is generated for every individual claim, including a claim by the same worker process. Consequently, an old execution cannot renew, complete, or fail a job after a newer claim has replaced its token. `attempts` counts failed or abandoned executions; successful executions do not increment it. As with any generic handler, a worker cannot necessarily cancel an external side effect already in progress after losing its lease. The database ownership checks prevent stale queue-state writes, but external systems must use their own idempotency protections.
+
+### Lease Renewal and Crash Recovery Sequence
+
+```mermaid
+sequenceDiagram
+  autonumber
+  participant W1 as Worker 1 (Active)
+  participant DB as MongoDB (Jobs Collection)
+  participant W2 as Worker 2 (Peer)
+
+  W1->>DB: claimNextJob()<br/>findOneAndUpdate(status: pending, runAt <= now)
+  DB-->>W1: Claim Granted (status: processing, workerId: W1, claimToken: T1, leaseExpiresAt: now+30s)
+
+  Note over W1: Handler Execution in Progress...
+  W1->>DB: renewLease(claimToken: T1, leaseExpiresAt > now)
+  DB-->>W1: Lease Renewed (leaseExpiresAt: now+30s)
+
+  Note over W1: Worker 1 crashes / network partition
+  Note over DB: leaseExpiresAt expires (now > leaseExpiresAt)
+
+  W2->>DB: claimNextJob()<br/>findOneAndUpdate(status: processing, leaseExpiresAt <= now)
+  DB-->>W2: Abandoned Lease Reclaimed (workerId: W2, claimToken: T2, attempts: attempts + 1)
+
+  Note over W1: Late Worker 1 wakes up and attempts completion
+  W1->>DB: completeJob(claimToken: T1, workerId: W1, leaseExpiresAt > now)
+  DB-->>W1: 0 Documents Matched (Stale Write Rejected!)
+
+  Note over W2: Worker 2 finishes handler execution
+  W2->>DB: completeJob(claimToken: T2, workerId: W2)
+  DB-->>W2: Job Marked Completed
+```
 
 ## Day 6 dead-letter lifecycle and replay
 
@@ -108,8 +201,27 @@ Sessions are not server-revocable: logout clears the browser cookie, but a copie
 
 `send_email` uses the Resend HTTP API from the worker process. Credentials and sender settings come only from `RESEND_API_KEY` and `EMAIL_FROM` in the server environment. A bounded abort timeout applies; provider 429/5xx/network/timeout failures are retryable, while permanent rejection and configuration/input errors fail safely. A successful result states `status: accepted` and may include the provider's message ID; this is provider acceptance, not proof of inbox delivery. A job/replay-scoped idempotency header is reused on retries. It can reduce duplicate sends when supported by the provider, but cannot guarantee exactly-once effects across provider retention, lease loss, or process failure.
 
-`generate_pdf` renders actual report text with PDFKit. `process_image` uses Sharp for JPEG/PNG/WebP resizing, conversion, and fixed 256×256 WebP thumbnails. Uploads use an authenticated, CSRF-protected raw image endpoint; only raster image bytes are accepted, with 5 MB, 4000-pixel side, and 16-megapixel limits. No remote URL or caller-supplied path can be used, preventing arbitrary local-file reads and SSRF. PDF report sections/content and output size are bounded.
+`generate_pdf` renders actual report text and a UTC ISO-8601 generation timestamp with PDFKit. `process_image` uses Sharp for JPEG/PNG/WebP resizing, conversion, and fixed 256×256 WebP thumbnails. Uploads use an authenticated, CSRF-protected raw image endpoint; only raster image bytes are accepted, with 5 MB, 4000-pixel side, and 16-megapixel limits. No remote URL or caller-supplied path can be used, preventing arbitrary local-file reads and SSRF. PDF report sections/content and output size are bounded.
 
 `JobAsset` stores metadata and an opaque random storage key. Bytes are written beneath a private `JOB_STORAGE_DIR` (default `server/storage/`) in owner-scoped `users/<ownerId>/uploads` or `outputs` folders using exclusive file creation. MongoDB stores neither binaries nor absolute paths. API and worker processes must use the same shared storage root; the default is suitable for processes on one host. A unique owner/job output index plus handler reuse prevents duplicate output records for a retry/replay of the immutable job. The completed job stores only a strict bounded `result` object in the same conditional update that verifies the active worker, claim token, and lease. A stale worker cannot persist its metadata. Results and Socket.IO notifications omit payloads, content, credentials, and storage paths.
 
-`GET /api/jobs/:jobId/artifacts/:artifactId` requires the caller to own the completed job, the asset to be associated with that job and owner, and the asset ID to appear in the persisted result. The API loads the file through the storage abstraction and returns private/no-store content with `nosniff`; there is no public/static file mount. The local filesystem is a single-host storage choice, not a distributed/replicated object store. Orphaned source uploads and files left after abrupt filesystem/database failures need operational retention cleanup; no automatic garbage collector is currently implemented.
+`GET /api/jobs/:jobId/artifacts/:artifactId` requires the caller to own the completed job, the asset to be associated with that job and owner, and the asset ID to appear in the persisted result. The API loads the file through the storage abstraction and returns private/no-store content with `nosniff`; PDFs are attachments and processed images are inline for secure previews. There is no public/static file mount. The local filesystem is a single-host storage choice, not a distributed/replicated object store. Orphaned source uploads and files left after abrupt filesystem/database failures need operational retention cleanup; no automatic garbage collector is currently implemented.
+
+## Day 11 reliability verification
+
+Pending-job claims and worker state transitions use MongoDB conditional atomic updates. Lease renewal and recovery race on the persisted lease timestamp; completion and failure additionally require the current worker and claim token. Duplicate concurrent replay or creation requests are serialized by state filters and the per-owner unique idempotency index. These properties prevent two valid persisted owners or duplicate job records, but do not prevent a handler from executing more than once after a crash or lease loss.
+
+Attempts increase once for a persisted handler failure or once when an abandoned lease is recovered. A crash before the failure/completion update remains `processing` until lease recovery; an API restart does not change durable MongoDB state. If completion persistence fails after a handler has performed an external side effect, recovery may execute that side effect again. Provider idempotency and per-job artifact reuse mitigate duplicates but are not an exactly-once guarantee.
+
+Worker logs include safe job identifiers, outcome categories, attempt/status fields, and monotonic handler execution duration. They omit payloads, credentials, JWTs, and claim tokens. Socket notifications are persisted best-effort; REST/MongoDB state remains authoritative.
+
+`npm run benchmark` in `server` runs the REST submission and atomic claim/completion benchmark against the process-specific local `_test` database. It excludes handler time and external services. Measured local results and environment are recorded in `DEVELOPMENT.md`; do not treat them as production capacity claims.
+
+## Demo readiness and container architecture
+
+The platform supports local and containerized demonstration:
+
+1. **Shared private artifact storage volume**: In Docker Compose (`docker-compose.yml`), a named volume `artifact_storage` is mounted at `/app/storage` across both the `api` and `worker` service containers. This ensures image and PDF outputs generated by workers are immediately accessible by the API's authenticated artifact endpoint (`GET /api/jobs/:id/artifacts/:artifactId`) without cross-container network mounts.
+2. **Mocked email delivery in demo mode**: When `EMAIL_DEMO_MODE=true` is enabled (default in Docker Compose and demo script), email handlers validate recipient formats and rate limits, returning mocked provider acceptance without contacting external APIs or transmitting unsolicited outbound emails.
+3. **Artifact retention and orphan cleanup**: `server/src/storage/artifact-cleanup.js` provides audited reclamation. It removes unreferenced disk files older than a configurable grace period (`ORPHAN_GRACE_HOURS`, default 1h) and purges expired artifacts older than `ARTIFACT_RETENTION_DAYS` (default 30d) along with their database metadata.
+4. **Safe demo seeding**: `npm run demo:seed` safely creates a demo account (`demo@example.test`) without deleting or overwriting existing user data, and stages four demonstrable sample jobs: a generated PDF report with timestamp, a Sharp thumbnail processing job, a mocked email task, and a dead-letter queue job ready for manual operator replay.

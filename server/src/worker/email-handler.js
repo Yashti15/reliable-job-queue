@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { JobHandlerError } from '../errors/job-handler-error.js'
 import { validateEmailPayload } from './job-payloads.js'
 import { getEmailPolicy, isAllowedEmailRecipient } from './email-policy.js'
@@ -36,6 +37,25 @@ export function createEmailHandler({
         name: 'EmailRecipientNotAllowedError',
       })
     }
+
+    const jobId = String(job?._id ?? '')
+    const ownerId = String(job?.ownerId ?? '')
+    if (!/^[0-9a-f]{24}$/i.test(jobId) || !/^[0-9a-f]{24}$/i.test(ownerId)) {
+      throw new JobHandlerError('Email job ownership context is missing.', {
+        name: 'JobExecutionContextError',
+      })
+    }
+
+    // In demo mode: strictly mock provider delivery; NEVER send unsolicited real emails
+    if (policy.isDemoMode || process.env.EMAIL_DEMO_MODE === 'true') {
+      return {
+        type: 'email',
+        provider: 'resend',
+        status: 'accepted',
+        providerMessageId: `demo_${randomUUID()}`,
+      }
+    }
+
     const config = getConfig()
     if (!config.apiKey || !isValidSender(config.from)) {
       throw new JobHandlerError(
@@ -49,13 +69,6 @@ export function createEmailHandler({
       })
     }
 
-    const jobId = String(job?._id ?? '')
-    const ownerId = String(job?.ownerId ?? '')
-    if (!/^[0-9a-f]{24}$/i.test(jobId) || !/^[0-9a-f]{24}$/i.test(ownerId)) {
-      throw new JobHandlerError('Email job ownership context is missing.', {
-        name: 'JobExecutionContextError',
-      })
-    }
     let quota
     try {
       quota = await reserveQuota({

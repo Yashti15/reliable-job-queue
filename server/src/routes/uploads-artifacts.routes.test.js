@@ -19,6 +19,7 @@ let root
 let store
 let server
 let baseUrl
+let imageArtifactId
 
 before(async () => {
   root = await mkdtemp(path.join(os.tmpdir(), 'rq-artifacts-test-'))
@@ -39,6 +40,23 @@ before(async () => {
     mediaType: 'application/pdf',
     sizeBytes: output.sizeBytes,
   })
+  const imageBytes = await sharp({
+    create: { width: 8, height: 6, channels: 3, background: '#478be0' },
+  })
+    .png()
+    .toBuffer()
+  const imageOutput = await store.save(ownerId, 'outputs', 'png', imageBytes)
+  imageArtifactId = new mongoose.Types.ObjectId()
+  assetRecords.push({
+    _id: imageArtifactId,
+    ownerId,
+    jobId,
+    kind: 'output',
+    storageKey: imageOutput.storageKey,
+    fileName: 'processed.png',
+    mediaType: 'image/png',
+    sizeBytes: imageOutput.sizeBytes,
+  })
 
   const job = {
     _id: jobId,
@@ -53,6 +71,12 @@ before(async () => {
           fileName: 'report.pdf',
           mediaType: 'application/pdf',
           sizeBytes: output.sizeBytes,
+        },
+        {
+          assetId: String(imageArtifactId),
+          fileName: 'processed.png',
+          mediaType: 'image/png',
+          sizeBytes: imageOutput.sizeBytes,
         },
       ],
     },
@@ -164,6 +188,7 @@ test('artifact download requires the completed job result and authenticated owne
   const url = `${baseUrl}/api/jobs/${jobId}/artifacts/${artifactId}`
   const allowed = await fetch(url)
   assert.equal(allowed.status, 200)
+  assert.match(allowed.headers.get('content-disposition'), /^attachment;/)
   assert.equal(allowed.headers.get('cache-control'), 'private, no-store')
   assert.equal(allowed.headers.get('x-content-type-options'), 'nosniff')
   assert.match(await allowed.text(), /^%PDF-/)
@@ -177,4 +202,20 @@ test('artifact download requires the completed job result and authenticated owne
     `${baseUrl}/api/jobs/${jobId}/artifacts/${new mongoose.Types.ObjectId()}`,
   )
   assert.equal(unlisted.status, 404)
+})
+
+test('processed image artifacts can be viewed inline only through the authenticated route', async () => {
+  const response = await fetch(
+    `${baseUrl}/api/jobs/${jobId}/artifacts/${imageArtifactId}`,
+  )
+
+  assert.equal(response.status, 200)
+  assert.equal(response.headers.get('content-type'), 'image/png')
+  assert.match(response.headers.get('content-disposition'), /^inline;/)
+
+  const unauthorized = await fetch(
+    `${baseUrl}/api/jobs/${jobId}/artifacts/${imageArtifactId}`,
+    { headers: { 'x-test-owner': otherOwnerId.toString() } },
+  )
+  assert.equal(unauthorized.status, 404)
 })

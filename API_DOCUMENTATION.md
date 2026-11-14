@@ -295,6 +295,10 @@ Start another worker in another terminal with `npm run worker` to process jobs c
 
 Each failed handler execution increments `attempts` once. `maxAttempts` counts total executions, including the first: with `maxAttempts: 3`, failures after executions 1 and 2 schedule retries, while failure after execution 3 moves the job to `dead`. A crash-recovered abandoned execution also increments attempts once; if it exhausts the limit, the job is dead-lettered. Replay resets attempts to zero while preserving a bounded record of prior failures and replay times.
 
+Claims, lease renewals, completions, failures, and replays use conditional MongoDB updates. A worker must still own the unexpired lease and matching claim token to persist completion/failure. An expired lease can be reclaimed, so handler execution is at least once; a completion-write outage after an external side effect can result in a repeated handler invocation. The queue does not guarantee exactly-once external effects. Resend idempotency and per-job artifact reuse are best-effort mitigations.
+
+API/worker restarts do not discard MongoDB job state. If a worker exits while a job is `processing`, another worker can recover it after `leaseExpiresAt`; recovery counts that abandoned execution once and sends the job to `dead` if the configured attempt limit is exhausted. Socket notifications are best-effort and are not an alternative to reading the job through REST.
+
 The retry number is the incremented `attempts` value:
 
 ```text
@@ -347,7 +351,7 @@ Payload shape:
 }
 ```
 
-Title is limited to 160 characters. Reports require 1–20 sections, headings up to 120 characters, at most 12 paragraphs per section, 2,000 characters per paragraph, and 80,000 total text characters. A rendered PDF is limited to 10 MB.
+Title is limited to 160 characters. Reports require 1–20 sections, headings up to 120 characters, at most 12 paragraphs per section, 2,000 characters per paragraph, and 80,000 total text characters. The generated document includes its UTC ISO-8601 generation timestamp. A rendered PDF is limited to 10 MB.
 
 ### `process_image`
 
@@ -389,4 +393,4 @@ Resize requires width and/or height between 1 and 4000 and optionally accepts `j
 GET /api/jobs/:jobId/artifacts/:artifactId
 ```
 
-The session owner must own a completed job and the artifact must be associated with that job and listed in its persisted result. Otherwise the endpoint returns `404 ARTIFACT_NOT_FOUND`. Downloads use `private, no-store` and `nosniff` headers. The default private filesystem root is `server/storage`; set `JOB_STORAGE_DIR` in the server environment to use another directory. It must not be exposed as a static/public web directory. Artifacts are not stored in MongoDB. Storage retention/cleanup is currently a manual operational responsibility.
+The session owner must own a completed job and the artifact must be associated with that job and listed in its persisted result. Otherwise the endpoint returns `404 ARTIFACT_NOT_FOUND`. PDF responses use attachment disposition; processed images use inline disposition for authenticated previews. Both use `private, no-store` and `nosniff` headers. The default private filesystem root is `server/storage`; set `JOB_STORAGE_DIR` in the server environment to use another directory. It must not be exposed as a static/public web directory. Artifacts are not stored in MongoDB. Storage retention/cleanup is currently a manual operational responsibility.

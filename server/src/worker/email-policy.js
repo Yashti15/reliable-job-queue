@@ -10,37 +10,46 @@ function parsePositiveInteger(value, defaultValue) {
 }
 
 export function getEmailPolicy(environment = process.env) {
-  const disabled = environment.EMAIL_SENDING_ENABLED !== 'true'
+  const isDemo = environment.EMAIL_DEMO_MODE === 'true'
+  const disabled = environment.EMAIL_SENDING_ENABLED !== 'true' && !isDemo
   if (disabled) {
     return {
       enabled: false,
       configured: false,
+      isDemoMode: false,
       allowedRecipients: [],
       configurationMessage:
         'Shared-provider email sending is disabled. Explicitly enable it with a recipient allowlist.',
     }
   }
 
-  const allowedRecipients = (environment.EMAIL_ALLOWED_RECIPIENTS ?? '')
+  let allowedRecipients = (environment.EMAIL_ALLOWED_RECIPIENTS ?? '')
     .split(',')
     .map((recipient) => recipient.trim().toLowerCase())
     .filter(Boolean)
+
+  if (isDemo && allowedRecipients.length === 0) {
+    allowedRecipients = ['@example.com', '@example.test', '@queueops.local', '@demo.local']
+  }
+
   const hasInvalidRecipient = allowedRecipients.some(
     (recipient) =>
-      !emailAddressPattern.test(recipient) && !emailDomainPattern.test(recipient),
+      recipient !== '*' &&
+      !emailAddressPattern.test(recipient) &&
+      !emailDomainPattern.test(recipient),
   )
   const settings = {
     dailyUserQuota: parsePositiveInteger(
       environment.EMAIL_DAILY_QUOTA_PER_USER,
-      5,
+      isDemo ? 50 : 5,
     ),
     dailyGlobalQuota: parsePositiveInteger(
       environment.EMAIL_DAILY_QUOTA_GLOBAL,
-      100,
+      isDemo ? 500 : 100,
     ),
     perMinuteUserLimit: parsePositiveInteger(
       environment.EMAIL_JOBS_PER_MINUTE,
-      3,
+      isDemo ? 10 : 3,
     ),
   }
 
@@ -51,6 +60,7 @@ export function getEmailPolicy(environment = process.env) {
   return {
     enabled: configured,
     configured,
+    isDemoMode: isDemo,
     allowedRecipients,
     ...settings,
     configurationMessage: configured
@@ -62,6 +72,9 @@ export function getEmailPolicy(environment = process.env) {
 export function isAllowedEmailRecipient(recipient, allowedRecipients) {
   if (typeof recipient !== 'string' || !Array.isArray(allowedRecipients)) {
     return false
+  }
+  if (allowedRecipients.includes('*')) {
+    return true
   }
   const normalized = recipient.trim().toLowerCase()
   const separator = normalized.lastIndexOf('@')

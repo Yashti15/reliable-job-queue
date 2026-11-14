@@ -9,9 +9,27 @@ The project includes a React/Vite monitoring dashboard, Express API, MongoDB-bac
 ## Prerequisites
 
 - Node.js and npm
-- A MongoDB Atlas cluster (or another MongoDB deployment)
+- A MongoDB Atlas cluster (or another MongoDB deployment), or Docker for containerized evaluation
 
-## Run locally
+## Quick demo with Docker Compose
+
+Run the complete multi-process stack (MongoDB, API, Worker, and Nginx-served UI) with a shared private storage volume:
+
+```bash
+docker compose up --build
+```
+
+In another terminal, populate the demo account and sample jobs (PDF report, Sharp thumbnail, mocked email, and dead-letter queue recovery):
+
+```bash
+npm run demo:seed
+```
+
+Open `http://localhost:5173` in your browser:
+* **Email**: `demo@example.test`
+* **Password**: `DemoPassword123!`
+
+## Run locally without Docker
 
 1. In MongoDB Atlas, create a cluster, create a database user, and add your current development IP address under **Network Access**.
 2. In the cluster's **Connect** dialog, select **Drivers** and copy the Node.js connection string.
@@ -52,6 +70,24 @@ Workers poll every 2000 ms by default when the queue is empty. Set `WORKER_POLL_
 Failed handler executions increment `attempts` once. When the incremented count is below `maxAttempts`, the job returns to `pending` with a future `runAt`; otherwise it enters the `dead` state. The retry delay defaults to a 2000 ms base, is capped at 60000 ms, and adds up to 20% positive jitter without exceeding the cap. Configure `BASE_DELAY_MS`, `MAX_RETRY_DELAY_MS`, and `RETRY_JITTER_RATIO` in `server/.env`.
 
 Each processing claim has a lease and a fresh `claimToken`. Workers renew the lease every 10000 ms by default; the default lease duration is 30000 ms. If a worker stops renewing and the lease expires, another worker can atomically reclaim the job. Reclaiming counts the abandoned execution once; if that reaches `maxAttempts`, the job becomes `dead`. Exhausted handler failures also enter `dead`. `attempts` counts failed or abandoned executions, while successful execution does not increment it. Configure `WORKER_LEASE_DURATION_MS` and `WORKER_HEARTBEAT_INTERVAL_MS`; the heartbeat interval must be shorter than the lease duration.
+
+## Reliability verification and benchmark
+
+MongoDB conditional updates are the concurrency boundary: only one worker can claim a pending job, and heartbeat/recovery/completion/failure operations must match the current owner, claim token, status, and lease. A lease-expired job may execute again; handler execution is therefore **at least once**, not exactly once. Job submission idempotency prevents duplicate job records, while provider idempotency and per-job output reuse reduce (but do not eliminate) duplicate external effects. Socket events remain best-effort; clients refresh from REST.
+
+Run the backend integration tests against a local MongoDB only:
+
+```powershell
+cd server
+$env:MONGODB_TEST_URI = "mongodb://127.0.0.1:27017/reliable_job_queue_test"
+npm test
+```
+
+The test helper rejects non-loopback hosts and database names not ending `_test`, then uses and drops a process-specific isolated database. Never set this variable to Atlas or production.
+
+For a reproducible local queue benchmark, use `npm run benchmark` from `server` with the same local-only `MONGODB_TEST_URI`. It submits jobs through the jobs REST router with 16 concurrent clients, then drains the batch using concurrent atomic claim/completion loops. Default volumes are 100 and 500 jobs and worker counts are 1 and 4; `BENCH_JOB_VOLUMES` (maximum 5000 per volume) and `BENCH_WORKER_COUNTS` (maximum 32) can override them. The benchmark excludes handler execution and provider/filesystem work; its throughput numbers describe this local API/queue/database path only.
+
+One measured run is recorded in [DEVELOPMENT.md](./DEVELOPMENT.md). It is a small local baseline, not a production capacity estimate. Each result includes submission throughput, claim/completion throughput, request latency, and queue latency; queue latency includes the time spent submitting the batch before draining begins.
 
 Dead jobs remain in the original jobs collection with their payload, type, attempts, final error, and `deadAt` timestamp. Use `GET /api/jobs/dead?page=1&limit=20` to inspect them, then `POST /api/jobs/:id/replay` to return a dead job to normal scheduling. Replay resets attempts and ownership, preserves the job's original creation `idempotencyKey`, and records a bounded replay history. A repeated create request with that key remains a conflict; replay does not create another job.
 
@@ -115,7 +151,7 @@ See [API_DOCUMENTATION.md](./API_DOCUMENTATION.md) for authentication and respon
 The worker supports three real handlers:
 
 - `send_email` submits a plain-text and/or HTML message to Resend. Set `RESEND_API_KEY` and `EMAIL_FROM` only in `server/.env`. The sender address/domain must be permitted by your Resend account. A successful response means Resend **accepted** the request, not that the recipient received it. The API key is never sent to the frontend or written to job results/logs.
-- `generate_pdf` renders a titled report with sections and paragraphs to an actual PDF.
+- `generate_pdf` renders a titled report with sections, paragraphs, and an ISO-8601 generation timestamp to an actual PDF.
 - `process_image` accepts an uploaded JPEG, PNG, or WebP and can resize, convert, or create a 256×256 WebP thumbnail. Remote URLs and filesystem paths are not accepted.
 
 Email sending is disabled by default, even if Resend credentials are present. To opt in for a controlled shared-provider setup, create a Resend account and API key, verify/configure the sender domain, then add `RESEND_API_KEY`, `EMAIL_FROM`, `EMAIL_SENDING_ENABLED=true`, and a non-empty `EMAIL_ALLOWED_RECIPIENTS` allowlist to `server/.env`. The allowlist accepts exact email addresses and exact domains prefixed with `@`; wildcard/subdomain matching is not supported. Configure `EMAIL_DAILY_QUOTA_PER_USER` (default 5), `EMAIL_DAILY_QUOTA_GLOBAL` (default 100), and `EMAIL_JOBS_PER_MINUTE` (default 3) for provider spend/abuse limits. Atomic MongoDB limits are enforced both when a user queues/replays an email and immediately before a worker contacts the provider. Submission and send counters are separate, so staging jobs over several days cannot bypass actual send limits; send attempts count conservatively even if provider acceptance is uncertain. Per-minute limits are also checked separately at submission and execution. Restart the worker after changing environment variables. Never put the provider key in client configuration or `VITE_` variables. Tests mock the provider and do not send email.
@@ -124,4 +160,4 @@ PDFs and transformed images are written to `server/storage/` by default, or to t
 
 Image uploads are limited to 5 MB, 4000×4000 pixels, and JPEG/PNG/WebP; generated artifacts are limited to 10 MB. PDF reports accept 1–20 sections and at most 80,000 total text characters. Example payloads and endpoint contracts are in [API_DOCUMENTATION.md](./API_DOCUMENTATION.md).
 
-Output records are unique per job and are reused on retries/replays to reduce duplicate file generation. Email requests reuse a job/replay-scoped Resend idempotency key across queue retries where the provider honors it. External side effects are not exactly-once: a worker can lose its lease after a provider accepts an email but before the queue persists completion, and provider idempotency is subject to provider support/retention. Job `result` stores only safe metadata; it never includes file bytes, server paths, email content, or credentials.
+Output records are unique per job and are reused on retries/replays to reduce duplicate file generation. Processed images are previewed inline through the same authenticated, owner-checked artifact route; PDFs remain attachment downloads. Email requests reuse a job/replay-scoped Resend idempotency key across queue retries where the provider honors it. External side effects are not exactly-once: a worker can lose its lease after a provider accepts an email but before the queue persists completion, and provider idempotency is subject to provider support/retention. Job `result` stores only safe metadata; it never includes file bytes, server paths, email content, or credentials.

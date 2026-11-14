@@ -42,4 +42,13 @@ test('recipient matching permits only exact addresses and exact allowed domains'
   assert.equal(isAllowedEmailRecipient('person@sub.approved.test', recipients), false)
   assert.equal(isAllowedEmailRecipient('person@attacker.test', recipients), false)
   assert.equal(isAllowedEmailRecipient('not-an-email', recipients), false)
+  assert.equal(isAllowedEmailRecipient('any@random.org', ['*']), true)
+})
+
+test('EMAIL_DEMO_MODE enables safe mocked delivery with default demo allowlist', () => {
+  const demoPolicy = getEmailPolicy({ EMAIL_DEMO_MODE: 'true' })
+  assert.equal(demoPolicy.enabled, true)
+  assert.equal(demoPolicy.isDemoMode, true)
+  assert.ok(demoPolicy.allowedRecipients.includes('@example.test'))
+  assert.equal(isAllowedEmailRecipient('operator@example.test', demoPolicy.allowedRecipients), true)
 })

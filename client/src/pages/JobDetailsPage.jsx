@@ -112,7 +112,17 @@ export function JobDetailsPage({ jobId }) {
                     <ul className="mt-3 space-y-2">
                       {job.result.artifacts?.map((artifact) => (
                         <li key={artifact.assetId} className="flex flex-wrap items-center justify-between gap-2 rounded-lg bg-slate-50 p-3 text-sm">
-                          <span className="min-w-0 break-all text-slate-700">{artifact.fileName} · {(artifact.sizeBytes / 1024).toFixed(1)} KB</span>
+                          <div className="min-w-0 flex-1">
+                            <span className="break-all text-slate-700">{artifact.fileName} · {(artifact.sizeBytes / 1024).toFixed(1)} KB</span>
+                            {artifact.mediaType.startsWith('image/') && (
+                              <img
+                                src={getArtifactDownloadUrl(job._id, artifact.assetId)}
+                                alt={`Processed image ${artifact.fileName}`}
+                                className="mt-3 max-h-80 max-w-full rounded-lg border border-slate-200 object-contain"
+                                loading="lazy"
+                              />
+                            )}
+                          </div>
                           <a
                             href={getArtifactDownloadUrl(job._id, artifact.assetId)}
                             className="font-semibold text-indigo-700 underline underline-offset-2"

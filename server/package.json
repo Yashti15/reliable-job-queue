@@ -8,9 +8,12 @@
     "start": "node src/server.js",
     "worker": "node src/worker.js",
     "worker:dev": "node --watch src/worker.js",
+    "benchmark": "node src/benchmarks/queue-benchmark.js",
     "migrate:tenant-indexes": "node src/migrations/migrate-tenant-indexes.js",
     "assign:legacy-job-owner": "node src/migrations/assign-legacy-job-owner.js",
-    "test": "node --test"
+    "demo:seed": "node src/demo/seed-demo.js",
+    "cleanup:artifacts": "node src/storage/run-cleanup.js",
+    "test": "node --test --test-timeout=15000"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",

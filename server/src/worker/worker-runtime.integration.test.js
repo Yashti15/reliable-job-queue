@@ -6,6 +6,7 @@ import {
   claimNextJob,
   completeJob,
   failJob,
+  renewLease,
 } from '../queue/job-queue.js'
 import { connectToIsolatedMongoTestDatabase } from '../test-support/isolated-mongo.js'
 import { createWorker } from './worker-runtime.js'
@@ -195,6 +196,157 @@ describe(
       assert.equal(completed.attempts, 1)
       assert.equal(completed.workerId, 'second-attempt-worker')
       assert.ok(completed.completedAt instanceof Date)
+    })
+
+    test('job recovers after completion persistence outage and worker restart', async () => {
+      const startTime = new Date()
+      const job = await Job.create({
+        type: 'restart_recovery',
+        payload: {},
+        runAt: new Date(startTime.getTime() - 1),
+        maxAttempts: 2,
+      })
+      const leaseDurationMs = 100
+      let firstWorkerTime = startTime
+      const interruptedWorker = createWorker({
+        workerId: 'interrupted-worker',
+        queue: {
+          claimNextJob: (workerId, options) =>
+            claimNextJob(workerId, { ...options, eventPublisher: async () => true }),
+          renewLease,
+          async completeJob() {
+            throw new Error('injected database outage before completion persistence')
+          },
+          failJob,
+        },
+        getHandler: () => async () => ({ processed: true }),
+        now: () => firstWorkerTime,
+        leaseDurationMs,
+        heartbeatIntervalMs: 20,
+        logger: silentLogger,
+      })
+
+      assert.equal(await interruptedWorker.processNextJob(), true)
+      const interrupted = await Job.findById(job._id).lean()
+      assert.equal(interrupted.status, 'processing')
+      assert.equal(interrupted.attempts, 0)
+      assert.equal(interrupted.workerId, 'interrupted-worker')
+
+      firstWorkerTime = new Date(interrupted.leaseExpiresAt.getTime() + 1)
+      const restartedWorker = createWorker({
+        workerId: 'restarted-worker',
+        queue: {
+          claimNextJob: (workerId, options) =>
+            claimNextJob(workerId, { ...options, eventPublisher: async () => true }),
+          renewLease,
+          completeJob: (claim, workerId, completedAt, publisher, result) =>
+            completeJob(claim, workerId, completedAt, publisher, result),
+          failJob,
+        },
+        getHandler: () => async () => ({ processed: true }),
+        now: () => firstWorkerTime,
+        leaseDurationMs,
+        heartbeatIntervalMs: 20,
+        logger: silentLogger,
+      })
+
+      assert.equal(await restartedWorker.processNextJob(), true)
+      const recovered = await Job.findById(job._id).lean()
+      assert.equal(recovered.status, 'completed')
+      assert.equal(recovered.attempts, 1)
+      assert.equal(recovered.workerId, 'restarted-worker')
+      assert.deepEqual(recovered.result, undefined)
+    })
+
+    test('expired lease during handler execution rejects stale worker result', async () => {
+      const startTime = new Date()
+      const job = await Job.create({
+        type: 'long_running',
+        payload: {},
+        runAt: new Date(startTime.getTime() - 1),
+        maxAttempts: 3,
+      })
+      const leaseDurationMs = 100
+      const afterExpiry = new Date(startTime.getTime() + leaseDurationMs + 1)
+      let workerTime = startTime
+      let heartbeatCallback
+      let announceRenewal
+      let announceFirstHandler
+      let releaseFirstHandler
+      let staleCompletionCalls = 0
+      const renewalAttempt = new Promise((resolve) => {
+        announceRenewal = resolve
+      })
+      const firstHandlerStarted = new Promise((resolve) => {
+        announceFirstHandler = resolve
+      })
+      const releaseHandler = new Promise((resolve) => {
+        releaseFirstHandler = resolve
+      })
+      const oldWorker = createWorker({
+        workerId: 'slow-old-worker',
+        queue: {
+          claimNextJob: (workerId, options) =>
+            claimNextJob(workerId, { ...options, eventPublisher: async () => true }),
+          async renewLease(claim, workerId, options) {
+            const renewed = await renewLease(claim, workerId, options)
+            if (!renewed) announceRenewal()
+            return renewed
+          },
+          async completeJob(...args) {
+            staleCompletionCalls += 1
+            return completeJob(...args)
+          },
+          failJob,
+        },
+        getHandler: () => async () => {
+          announceFirstHandler()
+          await releaseHandler
+          return { old: true }
+        },
+        now: () => workerTime,
+        leaseDurationMs,
+        heartbeatIntervalMs: 10,
+        setTimeoutFn(callback) {
+          heartbeatCallback = callback
+          return 1
+        },
+        clearTimeoutFn() {},
+        logger: silentLogger,
+      })
+
+      const oldExecution = oldWorker.processNextJob()
+      await firstHandlerStarted
+      workerTime = afterExpiry
+      heartbeatCallback()
+      await renewalAttempt
+
+      const newWorker = createWorker({
+        workerId: 'recovery-worker',
+        queue: {
+          claimNextJob: (workerId, options) =>
+            claimNextJob(workerId, { ...options, eventPublisher: async () => true }),
+          renewLease,
+          completeJob: (claim, workerId, completedAt, publisher, result) =>
+            completeJob(claim, workerId, completedAt, publisher, result),
+          failJob,
+        },
+        getHandler: () => async () => ({ recovered: true }),
+        now: () => afterExpiry,
+        leaseDurationMs: 1000,
+        heartbeatIntervalMs: 20,
+        logger: silentLogger,
+      })
+      assert.equal(await newWorker.processNextJob(), true)
+      releaseFirstHandler()
+      assert.equal(await oldExecution, true)
+      assert.equal(staleCompletionCalls, 0)
+
+      const recovered = await Job.findById(job._id).lean()
+      assert.equal(recovered.status, 'completed')
+      assert.equal(recovered.workerId, 'recovery-worker')
+      assert.equal(recovered.attempts, 1)
+      assert.equal(recovered.result, undefined)
     })
   },
 )

@@ -4,7 +4,11 @@ import { fileStore } from '../storage/file-store.js'
 import { JobHandlerError } from '../errors/job-handler-error.js'
 import { validatePdfPayload } from './job-payloads.js'
 
-export function createPdfHandler({ AssetModel = JobAsset, store = fileStore } = {}) {
+export function createPdfHandler({
+  AssetModel = JobAsset,
+  store = fileStore,
+  now = () => new Date(),
+} = {}) {
   return async function generatePdf(payload, { job } = {}) {
     const report = validatePdfPayload(payload)
     const { ownerId, jobId } = getExecutionIdentity(job)
@@ -16,7 +20,13 @@ export function createPdfHandler({ AssetModel = JobAsset, store = fileStore } = 
     }).lean()
     if (existing) return pdfResult(existing, report.title)
 
-    const pdf = await renderReport(report)
+    const generatedAt = now()
+    if (!(generatedAt instanceof Date) || !Number.isFinite(generatedAt.getTime())) {
+      throw new JobHandlerError('PDF generation time is unavailable.', {
+        name: 'PdfGenerationError',
+      })
+    }
+    const pdf = await renderReport(report, generatedAt)
     if (pdf.length > 10 * 1024 * 1024) {
       throw new JobHandlerError('Generated PDF exceeds the 10 MB output limit.', {
         name: 'PdfOutputTooLargeError',
@@ -76,9 +86,13 @@ function pdfResult(asset, title) {
   }
 }
 
-async function renderReport(report) {
+async function renderReport(report, generatedAt) {
   return new Promise((resolve, reject) => {
-    const document = new PDFDocument({ autoFirstPage: true, margin: 54 })
+    const document = new PDFDocument({
+      autoFirstPage: true,
+      margin: 54,
+      compress: false,
+    })
     const chunks = []
     document.on('data', (chunk) => chunks.push(chunk))
     document.once('error', () =>
@@ -91,6 +105,11 @@ async function renderReport(report) {
     document.once('end', () => resolve(Buffer.concat(chunks)))
     try {
       document.fontSize(22).fillColor('#172554').text(report.title, { align: 'left' })
+      document.moveDown()
+      document
+        .fontSize(9)
+        .fillColor('#64748b')
+        .text(`Generated: ${generatedAt.toISOString()}`)
       document.moveDown()
       for (const section of report.sections) {
         document.fontSize(15).fillColor('#1e3a8a').text(section.heading)

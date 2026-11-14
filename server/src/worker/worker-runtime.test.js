@@ -24,6 +24,35 @@ test('worker stop wakes an idle poll loop and resolves run()', async () => {
   assert.equal(claims, 1)
 })
 
+test('worker polling resumes after a transient MongoDB error without losing work', async () => {
+  let claims = 0
+  let worker
+  const errors = []
+  worker = createWorker({
+    workerId: 'temporary-db-outage-worker',
+    pollIntervalMs: 1,
+    queue: {
+      async claimNextJob() {
+        claims += 1
+        if (claims === 1) throw new Error('injected MongoDB outage')
+        worker.stop()
+        return null
+      },
+    },
+    logger: {
+      info() {},
+      warn() {},
+      error: (...args) => errors.push(args),
+    },
+  })
+
+  await worker.run()
+
+  assert.equal(claims, 2)
+  assert.ok(errors.some(([message]) => message === 'Worker polling failed.'))
+  assert.doesNotMatch(JSON.stringify(errors), /injected MongoDB outage/)
+})
+
 test('worker shutdown waits for its current job and claims no further work', async () => {
   let releaseHandler
   let announceHandlerStarted
@@ -109,6 +138,41 @@ test('worker passes the real handler result to conditional completion persistenc
   assert.equal(completionArguments[0], claimedJob)
   assert.equal(completionArguments[1], 'result-persistence-worker')
   assert.equal(completionArguments[4], expectedResult)
+})
+
+test('worker logs safe execution duration on completion', async () => {
+  const infoLogs = []
+  let monotonicTime = 100
+  const worker = createWorker({
+    workerId: 'duration-worker',
+    queue: {
+      async claimNextJob() {
+        return {
+          _id: 'duration-job',
+          type: 'test',
+          payload: { sensitive: 'not logged' },
+        }
+      },
+      async completeJob() {
+        return { status: 'completed' }
+      },
+    },
+    getHandler: () => async () => {
+      monotonicTime += 17.4
+      return { ok: true }
+    },
+    logger: {
+      info: (...args) => infoLogs.push(args),
+      warn() {},
+      error() {},
+    },
+    monotonicNow: () => monotonicTime,
+  })
+
+  await worker.processNextJob()
+  const completion = infoLogs.find(([message]) => message === 'Job completed.')
+  assert.equal(completion[1].executionDurationMs, 17)
+  assert.doesNotMatch(JSON.stringify(infoLogs), /sensitive|not logged/)
 })
 
 test('worker rejects invalid polling intervals', () => {
@@ -242,6 +306,68 @@ test('worker does not persist success after heartbeat reports lost ownership', a
   releaseHandler()
   assert.equal(await processing, true)
   assert.equal(completeUpdates, 0)
+})
+
+test('worker does not persist after heartbeat renewal fails temporarily', async () => {
+  let heartbeatCallback
+  let announceRenewalFailure
+  let releaseHandler
+  let completionUpdates = 0
+  const renewalFailed = new Promise((resolve) => {
+    announceRenewalFailure = resolve
+  })
+  const handlerStarted = new Promise((resolve) => {
+    releaseHandler = resolve
+  })
+  const errors = []
+  const worker = createWorker({
+    workerId: 'heartbeat-outage-worker',
+    heartbeatIntervalMs: 1,
+    leaseDurationMs: 100,
+    queue: {
+      async claimNextJob() {
+        return {
+          _id: 'heartbeat-outage-job',
+          type: 'test',
+          payload: {},
+          claimToken: 'claim-token',
+        }
+      },
+      async renewLease() {
+        announceRenewalFailure()
+        throw new Error('injected MongoDB outage')
+      },
+      async completeJob() {
+        completionUpdates += 1
+      },
+    },
+    getHandler: () => async () => {
+      await handlerStarted
+      return { ok: true }
+    },
+    logger: {
+      info() {},
+      warn() {},
+      error: (...args) => errors.push(args),
+    },
+    setTimeoutFn(callback) {
+      heartbeatCallback = callback
+      return 1
+    },
+    clearTimeoutFn() {},
+  })
+
+  const processing = worker.processNextJob()
+  await new Promise((resolve) => setImmediate(resolve))
+  heartbeatCallback()
+  await renewalFailed
+  await new Promise((resolve) => setImmediate(resolve))
+  releaseHandler()
+
+  assert.equal(await processing, true)
+  assert.equal(completionUpdates, 0)
+  assert.ok(errors.some(([message]) => message === 'Worker heartbeat failed; result will not be persisted.'))
+  assert.doesNotMatch(JSON.stringify(errors), /injected MongoDB outage/)
 })
 
 test('worker requires heartbeat interval to be shorter than lease duration', () => {

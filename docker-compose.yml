@@ -1,0 +1,69 @@
+services:
+  mongo:
+    image: mongo:7.0
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - mongo_data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+
+  api:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: ["node", "src/server.js"]
+    environment:
+      PORT: 5000
+      MONGODB_URI: mongodb://mongo:27017/reliable_job_queue
+      AUTH_JWT_SECRET: demo-jwt-secret-at-least-thirty-two-bytes-long!
+      CLIENT_ORIGIN: http://localhost:5173,http://127.0.0.1:5173,http://localhost:80
+      JOB_STORAGE_DIR: /app/storage
+      EMAIL_DEMO_MODE: "true"
+      WORKER_POLL_INTERVAL_MS: 2000
+    volumes:
+      - artifact_storage:/app/storage
+    ports:
+      - "5000:5000"
+    depends_on:
+      mongo:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: ./server
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    command: ["node", "src/worker.js"]
+    environment:
+      MONGODB_URI: mongodb://mongo:27017/reliable_job_queue
+      JOB_STORAGE_DIR: /app/storage
+      EMAIL_DEMO_MODE: "true"
+      WORKER_POLL_INTERVAL_MS: 2000
+    volumes:
+      - artifact_storage:/app/storage
+    depends_on:
+      mongo:
+        condition: service_healthy
+      api:
+        condition: service_started
+
+  client:
+    build:
+      context: ./client
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "5173:80"
+    depends_on:
+      - api
+
+volumes:
+  mongo_data:
+  artifact_storage:
