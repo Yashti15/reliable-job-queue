@@ -3,6 +3,7 @@ node_modules/
 **/coverage/
 **/.vite/
 server/.env
+server/storage/
 .env
 .env.*
 !.env.example

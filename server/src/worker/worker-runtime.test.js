@@ -1,0 +1,252 @@
+import assert from 'node:assert/strict'
+import { test } from 'node:test'
+import { createWorker } from './worker-runtime.js'
+
+test('worker stop wakes an idle poll loop and resolves run()', async () => {
+  let claims = 0
+  const worker = createWorker({
+    workerId: 'shutdown-test-worker',
+    pollIntervalMs: 60_000,
+    queue: {
+      async claimNextJob() {
+        claims += 1
+        return null
+      },
+    },
+    logger: { info() {}, warn() {}, error() {} },
+  })
+
+  const runPromise = worker.run()
+  await new Promise((resolve) => setImmediate(resolve))
+  worker.stop()
+  await runPromise
+
+  assert.equal(claims, 1)
+})
+
+test('worker shutdown waits for its current job and claims no further work', async () => {
+  let releaseHandler
+  let announceHandlerStarted
+  let claims = 0
+  let completions = 0
+  const handlerStarted = new Promise((resolve) => {
+    announceHandlerStarted = resolve
+  })
+  const worker = createWorker({
+    workerId: 'active-shutdown-test-worker',
+    pollIntervalMs: 1,
+    queue: {
+      async claimNextJob() {
+        claims += 1
+        if (claims > 1) {
+          return null
+        }
+        return { _id: 'test-job', type: 'test', payload: {} }
+      },
+      async completeJob() {
+        completions += 1
+        return { _id: 'test-job' }
+      },
+      async failJob() {
+        assert.fail('The successful test handler must not fail.')
+      },
+    },
+    getHandler: () =>
+      () =>
+        new Promise((resolve) => {
+          releaseHandler = resolve
+          announceHandlerStarted()
+        }),
+    logger: { info() {}, warn() {}, error() {} },
+  })
+
+  const runPromise = worker.run()
+  await handlerStarted
+  worker.stop()
+  assert.equal(completions, 0)
+  releaseHandler({ ok: true })
+  await runPromise
+
+  assert.equal(completions, 1)
+  assert.equal(claims, 1)
+})
+
+test('worker passes the real handler result to conditional completion persistence', async () => {
+  const expectedResult = {
+    type: 'email',
+    provider: 'resend',
+    status: 'accepted',
+    providerMessageId: 'provider-message-id',
+  }
+  let completionArguments
+  let handlerContext
+  const claimedJob = {
+    _id: '0123456789abcdef01234567',
+    ownerId: 'abcdef0123456789abcdef01',
+    type: 'send_email',
+    payload: { to: 'learner@example.test' },
+  }
+  const worker = createWorker({
+    workerId: 'result-persistence-worker',
+    queue: {
+      async claimNextJob() {
+        return claimedJob
+      },
+      async completeJob(...args) {
+        completionArguments = args
+        return { ...claimedJob, status: 'completed' }
+      },
+    },
+    getHandler: () => async (_payload, context) => {
+      handlerContext = context
+      return expectedResult
+    },
+    logger: { info() {}, warn() {}, error() {} },
+  })
+
+  assert.equal(await worker.processNextJob(), true)
+  assert.equal(handlerContext.job, claimedJob)
+  assert.equal(completionArguments[0], claimedJob)
+  assert.equal(completionArguments[1], 'result-persistence-worker')
+  assert.equal(completionArguments[4], expectedResult)
+})
+
+test('worker rejects invalid polling intervals', () => {
+  assert.throws(
+    () => createWorker({ pollIntervalMs: 0 }),
+    /pollIntervalMs must be a positive integer/,
+  )
+})
+
+test('completion persistence errors do not run the handler failure retry path', async () => {
+  let failureUpdates = 0
+  const worker = createWorker({
+    workerId: 'completion-error-worker',
+    queue: {
+      async claimNextJob() {
+        return { _id: 'completed-handler-job', type: 'test', payload: {} }
+      },
+      async completeJob() {
+        throw new Error('database unavailable')
+      },
+      async failJob() {
+        failureUpdates += 1
+      },
+    },
+    getHandler: () => async () => ({ ok: true }),
+    logger: { info() {}, warn() {}, error() {} },
+  })
+
+  assert.equal(await worker.processNextJob(), true)
+  assert.equal(failureUpdates, 0)
+})
+
+test('worker clears its scheduled heartbeat after handler execution', async () => {
+  const timers = new Map()
+  let nextTimerId = 0
+  let clearedTimers = 0
+  let renewals = 0
+  const worker = createWorker({
+    workerId: 'heartbeat-cleanup-worker',
+    heartbeatIntervalMs: 10,
+    leaseDurationMs: 100,
+    queue: {
+      async claimNextJob() {
+        return {
+          _id: 'heartbeat-job',
+          type: 'test',
+          payload: {},
+          claimToken: 'claim-token',
+        }
+      },
+      async renewLease() {
+        renewals += 1
+        return { leaseExpiresAt: new Date() }
+      },
+      async completeJob() {
+        return { _id: 'heartbeat-job' }
+      },
+    },
+    getHandler: () => async () => ({ ok: true }),
+    logger: { info() {}, warn() {}, error() {} },
+    setTimeoutFn(callback) {
+      const id = ++nextTimerId
+      timers.set(id, callback)
+      return id
+    },
+    clearTimeoutFn(id) {
+      if (timers.delete(id)) {
+        clearedTimers += 1
+      }
+    },
+  })
+
+  assert.equal(await worker.processNextJob(), true)
+  assert.equal(timers.size, 0)
+  assert.equal(clearedTimers, 1)
+  assert.equal(renewals, 0)
+})
+
+test('worker does not persist success after heartbeat reports lost ownership', async () => {
+  let heartbeatCallback
+  let announceRenewal
+  let completeUpdates = 0
+  let releaseHandler
+  const renewalStarted = new Promise((resolve) => {
+    announceRenewal = resolve
+  })
+  const handlerStarted = new Promise((resolve) => {
+    releaseHandler = resolve
+  })
+  const worker = createWorker({
+    workerId: 'lost-lease-worker',
+    heartbeatIntervalMs: 1,
+    leaseDurationMs: 100,
+    queue: {
+      async claimNextJob() {
+        return {
+          _id: 'lost-lease-job',
+          type: 'test',
+          payload: {},
+          claimToken: 'claim-token',
+        }
+      },
+      async renewLease() {
+        announceRenewal()
+        return null
+      },
+      async completeJob() {
+        completeUpdates += 1
+        return { _id: 'lost-lease-job' }
+      },
+      async failJob() {
+        assert.fail('Lost ownership must not persist a failure.')
+      },
+    },
+    getHandler: () => async () => {
+      await handlerStarted
+      return { ok: true }
+    },
+    logger: { info() {}, warn() {}, error() {} },
+    setTimeoutFn(callback) {
+      heartbeatCallback = callback
+      return 1
+    },
+    clearTimeoutFn() {},
+  })
+
+  const processing = worker.processNextJob()
+  await new Promise((resolve) => setImmediate(resolve))
+  heartbeatCallback()
+  await renewalStarted
+  releaseHandler()
+  assert.equal(await processing, true)
+  assert.equal(completeUpdates, 0)
+})
+
+test('worker requires heartbeat interval to be shorter than lease duration', () => {
+  assert.throws(
+    () => createWorker({ leaseDurationMs: 100, heartbeatIntervalMs: 100 }),
+    /heartbeatIntervalMs must be positive and shorter/,
+  )
+})

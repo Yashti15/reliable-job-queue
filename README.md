@@ -1,10 +1,10 @@
 # Reliable Job Queue with Dead-Letter Recovery
 
-A learning project for building a reliable background job queue with MongoDB atomic operations. The queue engine will be implemented in this project; it will not use BullMQ or another ready-made queue library.
+A learning project for building a reliable background job queue with MongoDB atomic operations. Queue mechanics are implemented incrementally in this project; it does not use BullMQ or another ready-made queue library.
 
-## Day 1 status
+## Current status
 
-The initial React/Vite client and Express API foundation are in place. The API exposes a health endpoint and requires MongoDB to connect before accepting requests. Queue processing is not implemented yet.
+The project includes a React/Vite monitoring dashboard, Express API, MongoDB-backed job queue, atomic claiming, standalone workers, retries, leases, crash recovery, dead-letter handling, replay, Socket.IO lifecycle notifications, worker monitoring, and bounded operational analytics.
 
 ## Prerequisites
 
@@ -15,8 +15,8 @@ The initial React/Vite client and Express API foundation are in place. The API e
 
 1. In MongoDB Atlas, create a cluster, create a database user, and add your current development IP address under **Network Access**.
 2. In the cluster's **Connect** dialog, select **Drivers** and copy the Node.js connection string.
-3. Copy `.env.example` to `server/.env`. Replace `<db_username>`, `<db_password>`, and `<cluster-host>` in `MONGODB_URI` with the database user's credentials and the host from Atlas. URL-encode special characters in the username or password. Do not paste credentials into chat or commit `server/.env`.
-4. In a terminal, run the API:
+3. Copy `.env.example` to `server/.env`. Replace `<db_username>`, `<db_password>`, and `<cluster-host>` in `MONGODB_URI` with the database user's credentials and the host from Atlas. URL-encode special characters in the username or password. Replace the `AUTH_JWT_SECRET` placeholder with a random value of at least 32 bytes (for example, generate one locally with Node's `crypto.randomBytes(48)`). Keep both values only in `server/.env`; do not paste credentials into chat or commit that file.
+4. In a terminal, start the API:
 
    ```powershell
    cd server
@@ -24,7 +24,16 @@ The initial React/Vite client and Express API foundation are in place. The API e
    npm run dev
    ```
 
-5. In another terminal, run the client:
+5. In a second terminal, start one worker:
+
+   ```powershell
+   cd server
+   npm run worker
+   ```
+
+6. To start another worker, open another terminal in `server` and run `npm run worker` again. Each worker generates a unique ID by default. You can set `WORKER_ID` explicitly and adjust worker settings in `server/.env`.
+
+7. In another terminal, run the client:
 
    ```powershell
    cd client
@@ -32,12 +41,87 @@ The initial React/Vite client and Express API foundation are in place. The API e
    npm run dev
    ```
 
-6. Open the Vite URL shown in the client terminal. The dashboard checks `http://localhost:5000/api/health` through the Vite development proxy.
+The client uses `/api` by default, which Vite proxies to `http://localhost:5000`; Vite also proxies the Socket.IO endpoint. To use another API base URL, copy `client/.env.example` to `client/.env.local` and set `VITE_API_BASE_URL` (for example `http://localhost:5000/api`). Only public API URLs belong in `VITE_` variables; never place backend credentials there.
+
+8. Open the Vite URL shown in the client terminal. QueueOps shows analytics, worker status, job lists/details, job creation, and dead-letter replay. Socket.IO events trigger REST refetches; MongoDB and the REST API remain authoritative.
 
 The API reads `MONGODB_URI` from `server/.env` and only starts listening after a successful database connection. If the URI is missing or the connection fails, startup exits with a safe diagnostic that does not print the connection string.
 
+Workers poll every 2000 ms by default when the queue is empty. Set `WORKER_POLL_INTERVAL_MS` in `server/.env` to change this. Set `WORKER_ID` only when you want a stable, unique ID for that worker; otherwise each process generates its own ID.
+
+Failed handler executions increment `attempts` once. When the incremented count is below `maxAttempts`, the job returns to `pending` with a future `runAt`; otherwise it enters the `dead` state. The retry delay defaults to a 2000 ms base, is capped at 60000 ms, and adds up to 20% positive jitter without exceeding the cap. Configure `BASE_DELAY_MS`, `MAX_RETRY_DELAY_MS`, and `RETRY_JITTER_RATIO` in `server/.env`.
+
+Each processing claim has a lease and a fresh `claimToken`. Workers renew the lease every 10000 ms by default; the default lease duration is 30000 ms. If a worker stops renewing and the lease expires, another worker can atomically reclaim the job. Reclaiming counts the abandoned execution once; if that reaches `maxAttempts`, the job becomes `dead`. Exhausted handler failures also enter `dead`. `attempts` counts failed or abandoned executions, while successful execution does not increment it. Configure `WORKER_LEASE_DURATION_MS` and `WORKER_HEARTBEAT_INTERVAL_MS`; the heartbeat interval must be shorter than the lease duration.
+
+Dead jobs remain in the original jobs collection with their payload, type, attempts, final error, and `deadAt` timestamp. Use `GET /api/jobs/dead?page=1&limit=20` to inspect them, then `POST /api/jobs/:id/replay` to return a dead job to normal scheduling. Replay resets attempts and ownership, preserves the job's original creation `idempotencyKey`, and records a bounded replay history. A repeated create request with that key remains a conflict; replay does not create another job.
+
+The unique per-owner `{ ownerId, idempotencyKey }` index prevents duplicate job records even when requests race; different users may reuse the same key. This is job-creation idempotency only: it does not guarantee that an external email/payment side effect runs exactly once. A handler and its downstream provider need their own idempotency mechanism for that guarantee.
+
+Claim tokens prevent a previous claim from renewing, completing, or failing a job after another worker has reclaimed it. A handler's external side effect cannot always be cancelled if its lease is lost; the queue prevents the stale worker from persisting a result, but cannot undo an already-performed external action.
+
+## Live updates, workers, and analytics
+
+The API and worker processes share a MongoDB-backed queue-event collection. The API polls it and forwards safe lifecycle notifications through Socket.IO; event payloads contain job/worker identifiers and status metadata, never job payloads, errors, idempotency keys, or claim tokens. Events are best-effort notifications with 24-hour retention, not a durable client stream. On connect/reconnect the dashboard refetches REST data to recover missed updates. Configure `CLIENT_ORIGIN` as a comma-separated list of exact frontend origins if the defaults (`localhost` and `127.0.0.1`) do not fit your local setup.
+
+## Authentication and tenant isolation
+
+The app supports separate user accounts. Register at `/register` or sign in at `/login`. Passwords are bcrypt-hashed. A 30-minute JWT is stored only in an `HttpOnly`, `SameSite=Strict` cookie; browser storage is not used for session tokens. State-changing requests require a matching CSRF cookie/header and an allowed `Origin`. The API protects job, analytics, and worker routes, and scopes job data, idempotency keys, analytics, worker visibility, and socket events to the authenticated user. All accounts currently have the same capabilities; roles and password recovery are not implemented.
+
+The worker processes are shared across accounts. A worker is shown only in the tenant associated with its current or most recently processed job; a worker that has never processed an owned job is not listed. Worker records do not represent dedicated per-user processes.
+
+Jobs created before tenant support have no owner and are deliberately inaccessible through authenticated APIs and ineligible for worker claims. Do not assign an owner without verifying the record's intended account. Local-only migration scripts support the existing global idempotency index and explicit one-job-at-a-time legacy ownership assignment. They refuse non-loopback MongoDB hosts or database names not ending in `_dev` or `_test`:
+
+```powershell
+cd server
+$env:MONGODB_URI = "mongodb://127.0.0.1:27017/reliable_job_queue_dev"
+$env:ALLOW_TENANT_INDEX_MIGRATION = "1"
+npm run migrate:tenant-indexes
+```
+
+For a verified legacy job, set `LEGACY_JOB_ID` and `LEGACY_OWNER_ID` to the intended MongoDB ObjectIds before running `npm run assign:legacy-job-owner`. Set `MONGODB_URI` to an explicitly local development database for these commands; it must end in `_dev` or `_test`. These utilities are intentionally restricted to local development/test databases; production/Atlas data migration requires a separately reviewed operational migration. Never point test or migration tooling at Atlas or production.
+
+Workers register in MongoDB, update `lastSeenAt` on heartbeat, report the currently claimed job, and mark themselves stopped during graceful shutdown. A worker with a stale heartbeat is shown as unresponsive; abrupt crashes are not reported as clean shutdowns. Analytics aggregate job records created in the last 30 days. Success rate is completed / (completed + failed + dead); failure rate is (failed + dead) / the same terminal total. Average execution duration is the mean of `completedAt - claimedAt` for completed jobs with both timestamps. Counts are time-windowed current states, not historical state-transition totals. There are no historical trend charts.
+
+## Backend tests
+
+The normal unit/API tests do not connect to Atlas. To run the MongoDB concurrency and worker integration tests, run a local MongoDB server and set an explicitly local test URI:
+
+```powershell
+cd server
+$env:MONGODB_TEST_URI = "mongodb://127.0.0.1:27017/reliable_job_queue_test"
+npm test
+Remove-Item Env:MONGODB_TEST_URI
+```
+
+The integration test fixture rejects non-local hosts and database names without a `_test` suffix. It creates a unique database for each test file process and drops only that generated database. Never set `MONGODB_TEST_URI` to Atlas or production.
+
 ## Current API
 
-- `GET /api/health` — API and database connection status.
+- `GET /api/health` — public API and database connection status.
+- `POST /api/auth/register`, `POST /api/auth/login`, `GET /api/auth/me`, `POST /api/auth/logout` — account/session endpoints.
+- `POST /api/jobs`, `GET /api/jobs`, `GET /api/jobs/:id`, `DELETE /api/jobs/:id` — authenticated, owner-scoped job operations.
+- `GET /api/jobs/dead`, `POST /api/jobs/:id/replay` — inspect and replay dead jobs.
+- `GET /api/analytics` — 30-day queue counts, terminal rates, and average execution duration.
+- `GET /api/workers` — up to 100 recently seen worker records with active/idle/unresponsive/disconnected state.
+- `POST /api/uploads/images` — upload a private JPEG, PNG, or WebP source image (authenticated and CSRF-protected).
+- `GET /api/jobs/:jobId/artifacts/:artifactId` — download a completed job's private output (authenticated and owner-scoped).
 
-See [API_DOCUMENTATION.md](./API_DOCUMENTATION.md) for the response shape and [DEVELOPMENT.md](./DEVELOPMENT.md) for the day-by-day progress log.
+Socket.IO event names include `job:created`, `job:claimed`, `job:completed`, `job:failed`, `job:retried`, `job:dead`, `job:replayed`, `job:cancelled`, `worker:updated`, and `worker:heartbeat`.
+
+See [API_DOCUMENTATION.md](./API_DOCUMENTATION.md) for authentication and response details and [DEVELOPMENT.md](./DEVELOPMENT.md) for the day-by-day progress log.
+
+## Real job handlers
+
+The worker supports three real handlers:
+
+- `send_email` submits a plain-text and/or HTML message to Resend. Set `RESEND_API_KEY` and `EMAIL_FROM` only in `server/.env`. The sender address/domain must be permitted by your Resend account. A successful response means Resend **accepted** the request, not that the recipient received it. The API key is never sent to the frontend or written to job results/logs.
+- `generate_pdf` renders a titled report with sections and paragraphs to an actual PDF.
+- `process_image` accepts an uploaded JPEG, PNG, or WebP and can resize, convert, or create a 256×256 WebP thumbnail. Remote URLs and filesystem paths are not accepted.
+
+Email sending is disabled by default, even if Resend credentials are present. To opt in for a controlled shared-provider setup, create a Resend account and API key, verify/configure the sender domain, then add `RESEND_API_KEY`, `EMAIL_FROM`, `EMAIL_SENDING_ENABLED=true`, and a non-empty `EMAIL_ALLOWED_RECIPIENTS` allowlist to `server/.env`. The allowlist accepts exact email addresses and exact domains prefixed with `@`; wildcard/subdomain matching is not supported. Configure `EMAIL_DAILY_QUOTA_PER_USER` (default 5), `EMAIL_DAILY_QUOTA_GLOBAL` (default 100), and `EMAIL_JOBS_PER_MINUTE` (default 3) for provider spend/abuse limits. Atomic MongoDB limits are enforced both when a user queues/replays an email and immediately before a worker contacts the provider. Submission and send counters are separate, so staging jobs over several days cannot bypass actual send limits; send attempts count conservatively even if provider acceptance is uncertain. Per-minute limits are also checked separately at submission and execution. Restart the worker after changing environment variables. Never put the provider key in client configuration or `VITE_` variables. Tests mock the provider and do not send email.
+
+PDFs and transformed images are written to `server/storage/` by default, or to the server-side `JOB_STORAGE_DIR` location. If the API and worker run as separate processes/hosts, configure them to use the same private shared directory. They are not stored in MongoDB or served as public static files. An authenticated download route checks the session owner, completed job, persisted result and output asset association before reading. Do not expose this directory through a web server or shared public drive. Back up or clean up the private storage directory according to your local retention needs.
+
+Image uploads are limited to 5 MB, 4000×4000 pixels, and JPEG/PNG/WebP; generated artifacts are limited to 10 MB. PDF reports accept 1–20 sections and at most 80,000 total text characters. Example payloads and endpoint contracts are in [API_DOCUMENTATION.md](./API_DOCUMENTATION.md).
+
+Output records are unique per job and are reused on retries/replays to reduce duplicate file generation. Email requests reuse a job/replay-scoped Resend idempotency key across queue retries where the provider honors it. External side effects are not exactly-once: a worker can lose its lease after a provider accepts an email but before the queue persists completion, and provider idempotency is subject to provider support/retention. Job `result` stores only safe metadata; it never includes file bytes, server paths, email content, or credentials.

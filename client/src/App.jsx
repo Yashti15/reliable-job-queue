@@ -1,24 +1,76 @@
 import { useEffect, useState } from 'react'
-import axios from 'axios'
+import { getHealth } from './api/jobs.js'
+import { DashboardPage } from './pages/DashboardPage.jsx'
+import { JobsPage } from './pages/JobsPage.jsx'
+import { CreateJobPage } from './pages/CreateJobPage.jsx'
+import { DeadJobsPage } from './pages/DeadJobsPage.jsx'
+import { JobDetailsPage } from './pages/JobDetailsPage.jsx'
+import { AppShell } from './components/AppShell.jsx'
+import { useQueueRealtime } from './realtime/RealtimeProvider.jsx'
+import { RealtimeProvider } from './realtime/RealtimeProvider.jsx'
+import { AuthPage } from './pages/AuthPage.jsx'
+import { useAuth } from './auth/AuthProvider.jsx'
 
-const initialHealth = { state: 'checking', database: 'unknown' }
-
-function App() {
-  const [health, setHealth] = useState(initialHealth)
+function useLocation() {
+  const [location, setLocation] = useState(() => ({
+    pathname: window.location.pathname,
+    search: window.location.search,
+  }))
 
   useEffect(() => {
-    let active = true
+    const updateLocation = () =>
+      setLocation({
+        pathname: window.location.pathname,
+        search: window.location.search,
+      })
+    window.addEventListener('popstate', updateLocation)
+    window.addEventListener('app:navigate', updateLocation)
+    return () => {
+      window.removeEventListener('popstate', updateLocation)
+      window.removeEventListener('app:navigate', updateLocation)
+    }
+  }, [])
 
-    axios
-      .get('/api/health')
+  return location
+}
+
+function DashboardApplication({ location, health, user, onLogout }) {
+  const { connectionState } = useQueueRealtime()
+  const page = location.pathname.match(/^\/jobs\/([^/]+)$/)
+    ? <JobDetailsPage jobId={decodeURIComponent(location.pathname.split('/').pop())} />
+    : location.pathname === '/jobs'
+      ? <JobsPage search={location.search} />
+      : location.pathname === '/create'
+        ? <CreateJobPage />
+        : location.pathname === '/dead'
+          ? <DeadJobsPage />
+          : <DashboardPage />
+
+  return (
+    <AppShell health={health} connectionState={connectionState} user={user} onLogout={onLogout}>
+      {page}
+    </AppShell>
+  )
+}
+
+function App() {
+  const location = useLocation()
+  const { user, loading, logout, sessionError, retrySession } = useAuth()
+  const [health, setHealth] = useState({ loading: true, connected: false })
+  useEffect(() => {
+    let active = true
+    getHealth()
       .then(({ data }) => {
         if (active) {
-          setHealth({ state: data.status, database: data.database })
+          setHealth({
+            loading: false,
+            connected: data?.status === 'ok' && data?.database === 'connected',
+          })
         }
       })
       .catch(() => {
         if (active) {
-          setHealth({ state: 'unavailable', database: 'unknown' })
+          setHealth({ loading: false, connected: false })
         }
       })
 
@@ -27,66 +79,35 @@ function App() {
     }
   }, [])
 
-  const apiIsOnline = health.state === 'ok'
+  if (loading) {
+    return <main className="grid min-h-screen place-items-center text-sm font-medium text-slate-500">Restoring your secure session…</main>
+  }
+  if (!user) {
+    if (sessionError) {
+      return (
+        <main className="grid min-h-screen place-items-center bg-[#f5f7fb] px-4">
+          <section className="max-w-md rounded-2xl border border-rose-200 bg-white p-7 shadow-lg">
+            <h1 className="text-lg font-bold text-slate-950">Session could not be checked</h1>
+            <p role="alert" className="mt-2 text-sm text-rose-800">{sessionError}</p>
+            <button
+              type="button"
+              onClick={retrySession}
+              className="mt-5 rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white hover:bg-indigo-700"
+            >
+              Retry connection
+            </button>
+          </section>
+        </main>
+      )
+    }
+    return <AuthPage mode={location.pathname === '/register' ? 'register' : 'login'} />
+  }
 
   return (
-    <main className="min-h-screen bg-slate-950 px-6 py-12 text-slate-100">
-      <div className="mx-auto max-w-4xl">
-        <p className="text-sm font-semibold uppercase tracking-[0.2em] text-cyan-400">
-          Learning project · Day 1
-        </p>
-        <h1 className="mt-4 text-4xl font-bold tracking-tight sm:text-5xl">
-          Reliable Job Queue
-        </h1>
-        <p className="mt-4 max-w-2xl text-lg leading-8 text-slate-300">
-          A MongoDB-backed queue built from first principles, with worker
-          recovery and dead-letter handling on the roadmap.
-        </p>
-
-        <section
-          aria-labelledby="health-heading"
-          className="mt-10 rounded-2xl border border-slate-800 bg-slate-900 p-6 shadow-xl"
-        >
-          <div className="flex flex-wrap items-center justify-between gap-4">
-            <div>
-              <h2 id="health-heading" className="text-xl font-semibold">
-                Service health
-              </h2>
-              <p className="mt-1 text-sm text-slate-400">
-                Live check from the Express API
-              </p>
-            </div>
-            <span
-              className={`rounded-full px-3 py-1 text-sm font-medium ${
-                apiIsOnline
-                  ? 'bg-emerald-400/10 text-emerald-300'
-                  : 'bg-amber-400/10 text-amber-300'
-              }`}
-            >
-              API: {health.state}
-            </span>
-          </div>
-          <p className="mt-5 text-slate-300">
-            MongoDB: <span className="font-medium text-white">{health.database}</span>
-          </p>
-          {!apiIsOnline && health.state !== 'checking' && (
-            <p role="status" className="mt-3 text-sm text-amber-200">
-              Start the API server to load its health status.
-            </p>
-          )}
-        </section>
-
-        <section className="mt-8">
-          <h2 className="text-lg font-semibold">Build roadmap</h2>
-          <p className="mt-2 text-slate-400">
-            Queue processing and job metrics are not available yet. We will add
-            them incrementally and verify each module before marking it done.
-          </p>
-        </section>
-      </div>
-    </main>
+    <RealtimeProvider key={user.id}>
+      <DashboardApplication location={location} health={health} user={user} onLogout={logout} />
+    </RealtimeProvider>
   )
 }
 
 export default App
-

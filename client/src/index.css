@@ -4,6 +4,12 @@
   font-family: Inter, ui-sans-serif, system-ui, sans-serif;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
+  color: #0f172a;
+  background: #f5f7fb;
+}
+
+html {
+  overflow-x: clip;
 }
 
 body {
@@ -12,3 +18,28 @@ body {
   min-height: 100vh;
 }
 
+#root {
+  min-height: 100vh;
+  overflow-x: clip;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible {
+  outline: 3px solid rgb(99 102 241 / 35%);
+  outline-offset: 2px;
+}
+
+::selection {
+  color: #312e81;
+  background: #e0e7ff;
+}
