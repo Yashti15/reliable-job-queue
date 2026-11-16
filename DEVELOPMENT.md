@@ -306,3 +306,42 @@ Mean queue latency is measured from persisted creation time to claim, after the 
 - Removed the fixed JWT signing secret. Compose now requires a locally supplied `AUTH_JWT_SECRET`, and API startup rejects missing or shorter-than-32-byte secrets.
 - Enabled MongoDB root authentication using locally supplied Compose environment variables; the API, worker, and MongoDB healthcheck authenticate against the local database.
 - Updated `.env.example` and the README with local secret-generation and setup guidance. No credentials were added to tracked files.
+
+## Artifact cleanup safety
+
+- The cleanup CLI defaults to dry-run and lists candidate artifacts. Deletion requires `--confirm`, `NODE_ENV=development` or `NODE_ENV=test`, a loopback MongoDB URI, and `ARTIFACT_CLEANUP_TARGET_ID` exactly matching the named local development/test database. Production, unspecified environments, and remote URI hosts cannot perform confirmed deletion. Loopback does not establish the ultimate server behind a tunnel/proxy; confirmed cleanup must not be used with forwarding.
+- The cleanup connection disables automatic index and collection creation. Dry-run only reads files and metadata; test fixtures assert no metadata writes/deletes.
+- Expired metadata is marked `cleanupPending` before file removal, then deleted only after file removal succeeds. A failed file deletion remains immediately discoverable on the next run regardless of orphan grace; if metadata deletion fails after the file is removed, the pending record safely retries and treats the missing file as already removed. Symlinked owner/category directories and files are skipped or rejected, and storage paths are checked against the configured root.
+- Artifact cleanup tests use temporary directories, temporary symlinks, and isolated in-memory model fixtures; tests stub the MongoDB connector, and no production database or user artifacts are used.
+
+## Autonomous project completion & reliability hardening
+
+### Tenant isolation & gateway validation
+- Enforced strict job payload validation at the API gateway: `generate_pdf` jobs validate section/character constraints (`validatePdfPayload`) and `process_image` jobs validate format/dimension constraints (`validateImagePayload`) before queue insertion.
+- Enforced strict tenant asset authorization: `process_image` job submission verifies that the referenced `assetId` exists and belongs strictly to the authenticated `ownerId`, returning HTTP 400 `INVALID_IMAGE_ASSET` on cross-tenant references or invalid IDs.
+- Hardened `fileStore.load`: reading files now resolves canonical paths with symlink rejection and containment checks (`resolveSafePath`), matching `stat` and `remove`.
+- Added unhandled rejection and uncaught exception handlers to `server.js` and `worker.js` for safe diagnostic logging and clean connection shutdown.
+
+### Multi-tenant quotas
+- Implemented tenant pending jobs quota: `USER_MAX_PENDING_JOBS` (default: 50). Returns HTTP 429 `JOB_QUOTA_EXCEEDED` when a tenant has reached their concurrency threshold.
+- Implemented tenant storage quotas: `USER_STORAGE_QUOTA_BYTES` (default: 50 MB) and `USER_MAX_UPLOAD_COUNT` (default: 50). Uploads exceeding tenant asset count or total storage limits are rejected with HTTP 429 `STORAGE_QUOTA_EXCEEDED`.
+
+### Queue performance & lease recovery
+- Added partial index `{ status: 1, priority: 1, createdAt: 1, _id: 1, leaseExpiresAt: 1 }` with `{ status: 'processing' }` in `job.model.js` to ensure index-covered sorting when reclaiming expired leases.
+- Leveraged `{ ownerId: 1, status: 1, createdAt: -1 }` prefix index for tenant pending job counting.
+
+### Automated frontend test suite
+- Created native frontend testing infrastructure with JSX loader and `react-dom/server`.
+- Added test coverage for:
+  - `StatusBadge.jsx`: verified all status badge variants and fallback styles.
+  - `Pagination.jsx`: verified multi-page bounds, total counts, and button states.
+  - `Feedback.jsx`: verified `ErrorState`, `LoadingState`, and `EmptyState` roles and text rendering.
+  - `PageHeader.jsx`: verified title, eyebrow, and action slot rendering.
+  - `JobTable.jsx`: verified `formatDate` utility and job table row rendering with conditional cancellation.
+  - `api/jobs.js`: verified `getApiErrorMessage` with timeouts, network failures, and server response mapping, plus `getArtifactDownloadUrl`.
+- Integrated `npm run test:client` and monorepo root `npm test`.
+
+### CI/CD and deployment engineering
+- Created GitHub Actions workflow (`.github/workflows/ci.yml`) testing backend on Node 22 with MongoDB 7 service container, testing frontend components and production builds, and verifying Docker Compose configurations.
+- Created production Docker Compose configuration (`docker-compose.prod.yml`) with memory limits, health checks, restart policies, and volume persistence.
+- Authored production configuration template (`.env.production.example`) and full deployment guide (`DEPLOYMENT.md`).

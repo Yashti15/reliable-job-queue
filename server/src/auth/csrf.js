@@ -1,13 +1,11 @@
 import { randomBytes, timingSafeEqual } from 'node:crypto'
-import { csrfCookieName } from './session.js'
+import { cookieOptions, csrfCookieName } from './session.js'
 
 export function issueCsrfToken(response) {
   const token = randomBytes(32).toString('base64url')
   response.cookie(csrfCookieName, token, {
+    ...cookieOptions(),
     httpOnly: false,
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'strict',
-    path: '/',
     maxAge: 30 * 60 * 1000,
   })
   return token

@@ -38,6 +38,14 @@ async function startServer() {
 
   process.once('SIGINT', () => void shutdown('SIGINT'))
   process.once('SIGTERM', () => void shutdown('SIGTERM'))
+  process.on('unhandledRejection', (reason) => {
+    console.error('API encountered unhandled promise rejection:', reason)
+  })
+  process.on('uncaughtException', async (error) => {
+    console.error('API encountered uncaught exception:', error)
+    await shutdown('uncaughtException').catch(() => {})
+    process.exit(1)
+  })
 
 }
 

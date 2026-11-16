@@ -61,6 +61,29 @@ Job creation assigns `ownerId` from the authenticated session; clients cannot ch
 
 For local development only, `npm run migrate:tenant-indexes` builds the per-tenant idempotency index before dropping the legacy global index. It requires `ALLOW_TENANT_INDEX_MIGRATION=1`, loopback MongoDB, and a database name ending in `_dev` or `_test`. `npm run assign:legacy-job-owner` requires explicit `LEGACY_JOB_ID` and `LEGACY_OWNER_ID` values and applies to one record only. Neither script can target Atlas/production; production index and data migration require an independently reviewed procedure.
 
+## Tenant Quotas and Rate Limits
+
+The API enforces tenant-level quotas to guarantee isolation, fair scheduling, and storage protection:
+
+| Quota | Setting | Default | Error Code & Behavior |
+|---|---|---|---|
+| Max Pending Jobs | `USER_MAX_PENDING_JOBS` | `50` | `429 JOB_QUOTA_EXCEEDED`: Submissions are rejected until existing pending jobs are processed. |
+| Max Uploaded Files | `USER_MAX_UPLOAD_COUNT` | `50` | `429 STORAGE_QUOTA_EXCEEDED`: New uploads are refused when the tenant has 50 active uploads. |
+| Max Stored Bytes | `USER_STORAGE_QUOTA_BYTES` | `50 MB` | `429 STORAGE_QUOTA_EXCEEDED`: Total upload and output artifact bytes cannot exceed 50 MB per tenant. |
+| Email Submissions | `EMAIL_DAILY_QUOTA_PER_USER` | `5` | `429 EMAIL_QUOTA_EXCEEDED`: Daily tenant outbound email limit. |
+| Email Rate Limit | `EMAIL_JOBS_PER_MINUTE` | `3` | `429 EMAIL_RATE_LIMITED`: Per-minute email queuing throttle. |
+
+### Error Codes Summary
+
+- `JOB_QUOTA_EXCEEDED`: The tenant has reached their maximum allowed pending jobs.
+- `STORAGE_QUOTA_EXCEEDED`: The tenant has exceeded total allowed storage bytes or upload file count.
+- `INVALID_PDF_PAYLOAD`: The `generate_pdf` job payload failed structural validation before being queued.
+- `INVALID_IMAGE_PAYLOAD`: The `process_image` job payload contains invalid operation parameters or dimensions.
+- `INVALID_IMAGE_ASSET`: The uploaded image asset referenced in `process_image` was not found or belongs to another tenant.
+- `IDEMPOTENCY_KEY_CONFLICT`: A job with the same idempotency key already exists for this tenant account.
+- `JOB_NOT_REPLAYABLE`: The job is not in `dead` status or was already replayed.
+- `JOB_NOT_CANCELLABLE`: The job is not in `pending` status.
+
 ## Jobs
 
 Job creation accepts `type`, object `payload`, and optional `priority`, `runAt`, `maxAttempts`, and `idempotencyKey`. The API controls `status`, `attempts`, timestamps, and `lastError`.

@@ -65,6 +65,16 @@ async function startWorker() {
     console.log('Worker received SIGTERM; stopping after the current job.')
     worker.stop()
   })
+  process.on('unhandledRejection', (reason) => {
+    console.error('Worker encountered unhandled promise rejection:', reason)
+  })
+  process.on('uncaughtException', async (error) => {
+    console.error('Worker encountered uncaught exception:', error)
+    worker.stop()
+    await monitor.stop().catch(() => {})
+    await mongoose.disconnect().catch(() => {})
+    process.exit(1)
+  })
 
   console.log(
     `Worker ${workerId} started; poll interval ${pollIntervalMs}ms, lease ${leaseOptions.leaseDurationMs}ms, heartbeat ${leaseOptions.heartbeatIntervalMs}ms.`,

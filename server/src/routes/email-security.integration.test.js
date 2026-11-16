@@ -92,7 +92,12 @@ describe(
                   subject: 'Test message',
                   text: 'Safe test content',
                 }
-              : { title: 'Report' }),
+              : {
+                  title: 'Report',
+                  sections: [
+                    { heading: 'Summary', paragraphs: ['Content'] },
+                  ],
+                }),
         }),
       })
     }

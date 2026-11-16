@@ -7,8 +7,14 @@ import JobAsset from '../models/job-asset.model.js'
 import { fileStore } from '../storage/file-store.js'
 import EmailQuota from '../models/email-quota.model.js'
 import { getEmailPolicy, isAllowedEmailRecipient } from '../worker/email-policy.js'
-import { validateEmailPayload } from '../worker/job-payloads.js'
+import {
+  validateEmailPayload,
+  validateImagePayload,
+  validatePdfPayload,
+} from '../worker/job-payloads.js'
 import { reserveEmailQuota } from '../worker/email-quota.js'
+import QuotaReservation from '../models/quota-reservation.model.js'
+import { reservePendingJobSlot } from '../worker/quota-reservation.js'
 
 const jobStatuses = ['pending', 'processing', 'completed', 'failed', 'dead']
 const priorities = ['low', 'normal', 'high']
@@ -117,6 +123,17 @@ function parsePositiveInteger(value, defaultValue) {
   return Number.isSafeInteger(number) ? number : null
 }
 
+export function getJobQuotaOptions(env = process.env) {
+  const parseQuotaNumber = (value, defaultValue) => {
+    if (value === undefined) return defaultValue
+    const parsed = Number(value)
+    return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : defaultValue
+  }
+  return {
+    maxPendingJobs: parseQuotaNumber(env.USER_MAX_PENDING_JOBS, 50),
+  }
+}
+
 export function createJobsRouter(
   JobModel = Job,
   {
@@ -126,6 +143,8 @@ export function createJobsRouter(
     EmailQuotaModel = EmailQuota,
     emailPolicyProvider = getEmailPolicy,
     now = () => new Date(),
+    quotaOptions = getJobQuotaOptions(),
+    ReservationModel = QuotaReservation,
   } = {},
 ) {
   const router = Router()
@@ -196,11 +215,98 @@ export function createJobsRouter(
       return
     }
 
+    let pendingJobReservation = null
+    const maxPendingJobs = quotaOptions.maxPendingJobs ?? 50
+    try {
+      const reservation = await reservePendingJobSlot({
+        ownerId: request.authUser._id,
+        maxPendingJobs,
+        JobModel,
+        ReservationModel,
+        now: now(),
+      })
+      if (!reservation.allowed) {
+        sendError(
+          response,
+          429,
+          reservation.code || 'JOB_QUOTA_EXCEEDED',
+          reservation.message ||
+            `Pending job limit of ${maxPendingJobs} reached for this account. Wait for pending jobs to complete before submitting more.`,
+        )
+        return
+      }
+      pendingJobReservation = reservation
+    } catch (quotaError) {
+      console.error(
+        `Pending job quota check failed (${quotaError?.name ?? 'UnknownError'}).`,
+      )
+    }
+
+    const jobType = request.body.type.trim()
+    if (jobType === 'generate_pdf') {
+      try {
+        validatePdfPayload(request.body.payload)
+      } catch (error) {
+        if (pendingJobReservation?.release) {
+          await pendingJobReservation.release()
+        }
+        sendError(response, 400, 'INVALID_PDF_PAYLOAD', error.message)
+        return
+      }
+    } else if (jobType === 'process_image') {
+      let imagePayload
+      try {
+        imagePayload = validateImagePayload(request.body.payload)
+      } catch (error) {
+        if (pendingJobReservation?.release) {
+          await pendingJobReservation.release()
+        }
+        sendError(response, 400, 'INVALID_IMAGE_PAYLOAD', error.message)
+        return
+      }
+      try {
+        const uploadAsset = await AssetModel.findOne({
+          _id: imagePayload.assetId,
+          ownerId: request.authUser._id,
+          kind: 'upload',
+        })
+        const assetExists = uploadAsset?.lean
+          ? await uploadAsset.lean()
+          : uploadAsset
+        if (!assetExists) {
+          if (pendingJobReservation?.release) {
+            await pendingJobReservation.release()
+          }
+          sendError(
+            response,
+            400,
+            'INVALID_IMAGE_ASSET',
+            'The specified uploaded image asset was not found for this account.',
+          )
+          return
+        }
+      } catch (assetError) {
+        if (pendingJobReservation?.release) {
+          await pendingJobReservation.release()
+        }
+        sendError(
+          response,
+          400,
+          'INVALID_IMAGE_ASSET',
+          'The specified uploaded image asset was not found for this account.',
+        )
+        return
+      }
+    }
+
     if (
-      request.body.type.trim() === 'send_email' &&
+      jobType === 'send_email' &&
       request.body.maxAttempts !== undefined &&
       request.body.maxAttempts > 3
     ) {
+      if (pendingJobReservation?.release) {
+        await pendingJobReservation.release()
+      }
       sendError(
         response,
         400,
@@ -211,7 +317,12 @@ export function createJobsRouter(
     }
 
     let quotaReservation = await prepareEmailReservation(request, response)
-    if (quotaReservation === false) return
+    if (quotaReservation === false) {
+      if (pendingJobReservation?.release) {
+        await pendingJobReservation.release()
+      }
+      return
+    }
 
     const jobData = {
       ownerId: request.authUser._id,
@@ -233,10 +344,23 @@ export function createJobsRouter(
 
     try {
       const job = await new JobModel(jobData).save()
+      if (pendingJobReservation?.release) {
+        await pendingJobReservation.release()
+        pendingJobReservation = null
+      }
       quotaReservation = null
       await publishJobEvent('job:created', job, eventPublisher)
       response.status(201).json({ success: true, data: { job } })
     } catch (error) {
+      if (pendingJobReservation?.release) {
+        try {
+          await pendingJobReservation.release()
+        } catch (releaseError) {
+          console.error(
+            `Pending job quota rollback failed (${releaseError?.name ?? 'UnknownError'}).`,
+          )
+        }
+      }
       if (quotaReservation?.release) {
         try {
           await quotaReservation.release()

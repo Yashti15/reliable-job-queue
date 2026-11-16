@@ -1,21 +1,33 @@
 import axios from 'axios'
 
 const api = axios.create({
-  baseURL: import.meta.env.VITE_API_BASE_URL || '/api',
+  baseURL: import.meta.env?.VITE_API_BASE_URL || '/api',
   headers: { 'Content-Type': 'application/json' },
   timeout: 10_000,
   withCredentials: true,
 })
 
+let inMemoryCsrfToken = null
+
+export function setCsrfToken(token) {
+  inMemoryCsrfToken = token
+}
+
+export function getCachedCsrfToken() {
+  return inMemoryCsrfToken || readCookie('rq_csrf')
+}
+
 function readCookie(name) {
   const prefix = `${name}=`
-  const entry = document.cookie.split('; ').find((cookie) => cookie.startsWith(prefix))
+  const entry = typeof document !== 'undefined' && document.cookie
+    ? document.cookie.split('; ').find((cookie) => cookie.startsWith(prefix))
+    : undefined
   return entry ? decodeURIComponent(entry.slice(prefix.length)) : undefined
 }
 
 api.interceptors.request.use((config) => {
   if (!['get', 'head', 'options'].includes(config.method?.toLowerCase())) {
-    const csrfToken = readCookie('rq_csrf')
+    const csrfToken = inMemoryCsrfToken || readCookie('rq_csrf')
     if (csrfToken) config.headers.set('X-CSRF-Token', csrfToken)
   }
   return config
@@ -38,11 +50,16 @@ api.interceptors.response.use(
 )
 
 export function getSocketOrigin() {
-  return new URL(import.meta.env.VITE_API_BASE_URL || '/api', window.location.origin).origin
+  const windowOrigin = typeof window !== 'undefined' ? window.location?.origin : 'http://localhost:5173'
+  return new URL(import.meta.env?.VITE_API_BASE_URL || '/api', windowOrigin).origin
 }
 
-export function getCsrfToken() {
-  return api.get('/auth/csrf')
+export async function getCsrfToken() {
+  const response = await api.get('/auth/csrf')
+  if (response.data?.data?.csrfToken) {
+    inMemoryCsrfToken = response.data.data.csrfToken
+  }
+  return response
 }
 
 export function registerAccount(details) {
@@ -93,7 +110,7 @@ export function uploadImage(file) {
 }
 
 export function getArtifactDownloadUrl(jobId, assetId) {
-  const baseUrl = import.meta.env.VITE_API_BASE_URL || '/api'
+  const baseUrl = import.meta.env?.VITE_API_BASE_URL || '/api'
   return `${baseUrl.replace(/\/$/, '')}/jobs/${encodeURIComponent(jobId)}/artifacts/${encodeURIComponent(assetId)}`
 }
 

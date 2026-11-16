@@ -30,7 +30,7 @@ services:
       PORT: 5000
       MONGODB_URI: "mongodb://${MONGO_ROOT_USERNAME:?Set MONGO_ROOT_USERNAME in the project .env file}:${MONGO_ROOT_PASSWORD:?Set MONGO_ROOT_PASSWORD in the project .env file}@mongo:27017/reliable_job_queue?authSource=admin"
       AUTH_JWT_SECRET: ${AUTH_JWT_SECRET:?Set AUTH_JWT_SECRET in the project .env file}
-      CLIENT_ORIGIN: http://localhost:5173,http://127.0.0.1:5173,http://localhost:80
+      CLIENT_ORIGIN: http://localhost:5173,http://127.0.0.1:5173,http://localhost:80,http://localhost,http://127.0.0.1
       JOB_STORAGE_DIR: /app/storage
       EMAIL_DEMO_MODE: "true"
       WORKER_POLL_INTERVAL_MS: 2000

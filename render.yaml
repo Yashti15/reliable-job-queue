@@ -1,0 +1,35 @@
+services:
+  - type: web
+    name: queueops-api
+    runtime: node
+    plan: free
+    region: oregon
+    branch: development
+    rootDir: server
+    buildCommand: npm ci
+    startCommand: npm run start:production
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: MONGODB_URI
+        sync: false
+      - key: AUTH_JWT_SECRET
+        generateValue: true
+      - key: CLIENT_ORIGIN
+        sync: false
+      - key: COOKIE_SAME_SITE
+        value: none
+      - key: JOB_STORAGE_DIR
+        value: ./storage
+      - key: EMAIL_DEMO_MODE
+        value: "true"
+      - key: EMAIL_SENDING_ENABLED
+        value: "false"
+      - key: WORKER_POLL_INTERVAL_MS
+        value: "2000"
+      - key: WORKER_LEASE_DURATION_MS
+        value: "30000"
+      - key: WORKER_HEARTBEAT_INTERVAL_MS
+        value: "10000"

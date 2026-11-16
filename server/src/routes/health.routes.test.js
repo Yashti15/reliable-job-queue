@@ -21,13 +21,19 @@ after(async () => {
   })
 })
 
-test('GET /api/health reports API and database status', async () => {
-  const response = await fetch(`${baseUrl}/api/health`)
+test('GET /api/health and /health report API and database status', async () => {
+  const [apiHealth, rootHealth] = await Promise.all([
+    fetch(`${baseUrl}/api/health`),
+    fetch(`${baseUrl}/health`),
+  ])
 
-  assert.equal(response.status, 200)
-  assert.deepEqual(await response.json(), {
+  assert.equal(apiHealth.status, 200)
+  assert.equal(rootHealth.status, 200)
+  const expected = {
     status: 'ok',
     service: 'reliable-job-queue-api',
     database: 'not_configured',
-  })
+  }
+  assert.deepEqual(await apiHealth.json(), expected)
+  assert.deepEqual(await rootHealth.json(), expected)
 })

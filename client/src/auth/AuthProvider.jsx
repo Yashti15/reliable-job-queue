@@ -22,6 +22,7 @@ export function AuthProvider({ children }) {
     let active = true
     setLoading(true)
     setSessionError('')
+    getCsrfToken().catch(() => {})
     getCurrentUser()
       .then(({ data }) => {
         if (active) setUser(data.data.user)

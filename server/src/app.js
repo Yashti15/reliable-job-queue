@@ -38,6 +38,7 @@ app.use(
 app.use(express.json({ limit: '100kb' }))
 app.use(cookieParser())
 app.use('/api/auth', authRoutes)
+app.use('/health', healthRoutes)
 app.use('/api/health', healthRoutes)
 app.use('/api/jobs', authenticate, requireCsrf, jobsRoutes)
 app.use(

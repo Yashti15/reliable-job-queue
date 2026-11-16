@@ -10,6 +10,8 @@
     "demo:seed": "npm run demo:seed --prefix server",
     "cleanup:artifacts": "npm run cleanup:artifacts --prefix server",
     "test:server": "npm test --prefix server",
+    "test:client": "npm test --prefix client",
+    "test": "npm run test:server && npm run test:client",
     "build:client": "npm run build --prefix client"
   }
 }

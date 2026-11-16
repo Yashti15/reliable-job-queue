@@ -1,5 +1,13 @@
 import { randomUUID } from 'node:crypto'
-import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import {
+  lstat,
+  mkdir,
+  readFile,
+  realpath,
+  rm,
+  stat as statFile,
+  writeFile,
+} from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -15,7 +23,7 @@ export function createFileStore({ root } = {}) {
     return fixedRoot ?? path.resolve(process.env.JOB_STORAGE_DIR || defaultRoot)
   }
 
-  function resolvePath(ownerId, storageKey, category) {
+  function resolvePath(ownerId, storageKey, category, root = getStorageRoot()) {
     if (!ownerIdPattern.test(String(ownerId))) {
       throw new TypeError('Invalid file owner.')
     }
@@ -27,7 +35,7 @@ export function createFileStore({ root } = {}) {
     }
 
     const userDirectory = path.resolve(
-      getStorageRoot(),
+      root,
       'users',
       String(ownerId),
       category,
@@ -37,6 +45,52 @@ export function createFileStore({ root } = {}) {
       throw new TypeError('Invalid stored file path.')
     }
     return { userDirectory, filePath }
+  }
+
+  async function resolveSafePath(ownerId, storageKey, category) {
+    const configuredRoot = path.resolve(getStorageRoot())
+    const rootStats = await lstat(configuredRoot)
+    if (rootStats.isSymbolicLink() || !rootStats.isDirectory()) {
+      throw unsafeStoragePathError()
+    }
+    const root = await realpath(configuredRoot)
+    const usersDirectory = path.join(root, 'users')
+    const ownerDirectory = path.join(usersDirectory, String(ownerId))
+    const { userDirectory, filePath } = resolvePath(
+      ownerId,
+      storageKey,
+      category,
+      root,
+    )
+
+    for (const directory of [usersDirectory, ownerDirectory, userDirectory]) {
+      const directoryStats = await lstat(directory)
+      if (directoryStats.isSymbolicLink() || !directoryStats.isDirectory()) {
+        throw unsafeStoragePathError()
+      }
+
+      const resolvedDirectory = await realpath(directory)
+      if (!isPathWithin(root, resolvedDirectory)) {
+        throw unsafeStoragePathError()
+      }
+    }
+
+    const safeFilePath = path.join(await realpath(userDirectory), path.basename(filePath))
+    try {
+      const fileStats = await lstat(safeFilePath)
+      if (fileStats.isSymbolicLink() || !fileStats.isFile()) {
+        throw unsafeStoragePathError()
+      }
+
+      const resolvedFile = await realpath(safeFilePath)
+      if (!isPathWithin(root, resolvedFile)) {
+        throw unsafeStoragePathError()
+      }
+      return resolvedFile
+    } catch (error) {
+      if (error?.code === 'ENOENT') return safeFilePath
+      throw error
+    }
   }
 
   async function save(ownerId, category, extension, buffer) {
@@ -56,13 +110,23 @@ export function createFileStore({ root } = {}) {
   }
 
   async function load(ownerId, storageKey, category) {
-    const { filePath } = resolvePath(ownerId, storageKey, category)
-    return readFile(filePath)
+    const safeFilePath = await resolveSafePath(ownerId, storageKey, category)
+    return readFile(safeFilePath)
+  }
+
+  async function stat(ownerId, storageKey, category) {
+    return statFile(await resolveSafePath(ownerId, storageKey, category))
   }
 
   async function remove(ownerId, storageKey, category) {
-    const { filePath } = resolvePath(ownerId, storageKey, category)
-    await rm(filePath, { force: true })
+    let safeFilePath
+    try {
+      safeFilePath = await resolveSafePath(ownerId, storageKey, category)
+    } catch (error) {
+      if (error?.code === 'ENOENT') return
+      throw error
+    }
+    await rm(safeFilePath, { force: true })
   }
 
   return {
@@ -71,8 +135,25 @@ export function createFileStore({ root } = {}) {
     },
     save,
     load,
+    stat,
     remove,
   }
 }
 
 export const fileStore = createFileStore()
+
+function isPathWithin(root, candidate) {
+  const relativePath = path.relative(root, candidate)
+  return (
+    relativePath !== '' &&
+    relativePath !== '..' &&
+    !relativePath.startsWith(`..${path.sep}`) &&
+    !path.isAbsolute(relativePath)
+  )
+}
+
+function unsafeStoragePathError() {
+  const error = new TypeError('Stored artifact path contains a symbolic link.')
+  error.code = 'ERR_UNSAFE_STORAGE_PATH'
+  return error
+}

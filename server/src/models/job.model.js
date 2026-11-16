@@ -127,6 +127,10 @@ jobSchema.index(
   { status: 1, leaseExpiresAt: 1 },
   { partialFilterExpression: { status: 'processing' } },
 )
+jobSchema.index(
+  { status: 1, priority: 1, createdAt: 1, _id: 1, leaseExpiresAt: 1 },
+  { partialFilterExpression: { status: 'processing' } },
+)
 
 const Job = mongoose.models.Job ?? mongoose.model('Job', jobSchema)
 

@@ -92,6 +92,21 @@ The client uses `/api` by default, which Vite proxies to `http://localhost:5000`
 
 For standalone local development, run `npm run demo:seed` from the repository root after configuring `server/.env`. The host-side seed command reads `MONGODB_URI` from `server/.env`; it does not use the root Compose `.env`. Verify that it targets the intended development database, never production.
 
+## Artifact cleanup
+
+Cleanup is read-only by default. From the repository root, `npm run cleanup:artifacts` reports expired artifacts and old orphan files without deleting files or changing records. To delete in a development or test environment, run from `server` and explicitly confirm:
+
+```powershell
+cd server
+$env:NODE_ENV = 'development'
+$env:ARTIFACT_CLEANUP_TARGET_ID = 'reliable_job_queue_dev'
+npm run cleanup:artifacts -- --confirm
+```
+
+Set `ARTIFACT_CLEANUP_TARGET_ID` in `server/.env` for repeat use; it must exactly match a database name containing a `dev`/`development` token when `NODE_ENV=development`, or a `test` token when `NODE_ENV=test`. The command displays the environment and candidate count before deletion. Confirmed cleanup is refused for production, unspecified environments, non-loopback MongoDB URIs, and mismatched target identities. The cleanup connection disables automatic index and collection creation, and dry-run performs reads only.
+
+The loopback check validates the URI host, not the database server behind a local SSH tunnel or port forward. Do not use confirmed cleanup with a tunnel, proxy, or other forwarding setup; the target identity is an additional operator assertion, not proof of the server's physical location. Production deletion remains disabled.
+
 The API reads `MONGODB_URI` from `server/.env` and only starts listening after a successful database connection. If the URI is missing or the connection fails, startup exits with a safe diagnostic that does not print the connection string.
 
 Workers poll every 2000 ms by default when the queue is empty. Set `WORKER_POLL_INTERVAL_MS` in `server/.env` to change this. Set `WORKER_ID` only when you want a stable, unique ID for that worker; otherwise each process generates its own ID.
@@ -147,18 +162,38 @@ For a verified legacy job, set `LEGACY_JOB_ID` and `LEGACY_OWNER_ID` to the inte
 
 Workers register in MongoDB, update `lastSeenAt` on heartbeat, report the currently claimed job, and mark themselves stopped during graceful shutdown. A worker with a stale heartbeat is shown as unresponsive; abrupt crashes are not reported as clean shutdowns. Analytics aggregate job records created in the last 30 days. Success rate is completed / (completed + failed + dead); failure rate is (failed + dead) / the same terminal total. Average execution duration is the mean of `completedAt - claimedAt` for completed jobs with both timestamps. Counts are time-windowed current states, not historical state-transition totals. There are no historical trend charts.
 
-## Backend tests
+## Backend and frontend tests
 
-The normal unit/API tests do not connect to Atlas. To run the MongoDB concurrency and worker integration tests, run a local MongoDB server and set an explicitly local test URI:
+The repository provides automated testing for both backend and frontend layers:
 
-```powershell
-cd server
-$env:MONGODB_TEST_URI = "mongodb://127.0.0.1:27017/reliable_job_queue_test"
-npm test
-Remove-Item Env:MONGODB_TEST_URI
-```
+1. **Frontend component and unit tests**:
+   Fast native tests verifying React components (`StatusBadge`, `Pagination`, `Feedback`, `PageHeader`, `JobTable`), formatting utilities, and API client behavior:
 
-The integration test fixture rejects non-local hosts and database names without a `_test` suffix. It creates a unique database for each test file process and drops only that generated database. Never set `MONGODB_TEST_URI` to Atlas or production.
+   ```powershell
+   npm run test:client
+   ```
+
+2. **Backend unit and safety tests**:
+   Unit tests for retry logic, worker leases, handler dispatch, artifact cleanup safety, tenant quotas, and input validation without requiring a live MongoDB server:
+
+   ```powershell
+   npm run test:server
+   ```
+
+3. **Backend MongoDB integration tests**:
+   To run the MongoDB concurrency, tenant isolation, and worker runtime integration tests, run a local MongoDB server and set an explicitly local test URI:
+
+   ```powershell
+   cd server
+   $env:MONGODB_TEST_URI = "mongodb://127.0.0.1:27017/reliable_job_queue_test"
+   npm test
+   Remove-Item Env:MONGODB_TEST_URI
+   ```
+
+   The integration test fixture rejects non-local hosts and database names without a `_test` suffix. It creates a unique database for each test file process and drops only that generated database. Never set `MONGODB_TEST_URI` to Atlas or production.
+
+4. **Continuous Integration**:
+   Automated GitHub Actions CI (`.github/workflows/ci.yml`) runs backend tests against a MongoDB 7 service container, executes frontend component tests, verifies production client builds, validates Docker Compose configurations, and tests container builds.
 
 ## Current API
 

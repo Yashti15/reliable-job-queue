@@ -61,9 +61,12 @@ export function verifySession(token) {
 }
 
 export function cookieOptions() {
+  const sameSiteEnv = (process.env.COOKIE_SAME_SITE || 'strict').toLowerCase()
+  const validSameSite = ['strict', 'lax', 'none'].includes(sameSiteEnv) ? sameSiteEnv : 'strict'
+  const isSecure = validSameSite === 'none' || process.env.NODE_ENV === 'production'
   return {
-    secure: process.env.NODE_ENV === 'production',
-    sameSite: 'strict',
+    secure: isSecure,
+    sameSite: validSameSite,
     path: '/',
   }
 }

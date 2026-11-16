@@ -7,7 +7,7 @@ const connectionStates = {
   3: 'disconnecting',
 }
 
-export async function connectDatabase() {
+export async function connectDatabase(options = {}) {
   const uri = process.env.MONGODB_URI?.trim()
 
   if (!uri) {
@@ -15,7 +15,7 @@ export async function connectDatabase() {
   }
 
   try {
-    await mongoose.connect(uri)
+    await mongoose.connect(uri, options)
   } catch (error) {
     const reason = error instanceof Error ? error.name : 'UnknownError'
     throw new Error(
