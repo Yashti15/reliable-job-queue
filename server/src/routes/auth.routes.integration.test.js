@@ -23,6 +23,7 @@ describe(
       closeTestDatabase = await connectToIsolatedMongoTestDatabase()
       await User.init()
       const app = express()
+      app.set('trust proxy', 1)
       app.use(express.json())
       app.use(cookieParser())
       app.use('/api/auth', createAuthRouter())

@@ -34,7 +34,11 @@ function safeUser(user) {
   return { id: String(user._id), name: user.name, email: user.email }
 }
 
-export function createAuthRouter({ UserModel = User, authenticateUser = authenticate } = {}) {
+export function createAuthRouter({
+  UserModel = User,
+  authenticateUser = authenticate,
+  rateLimiter = authRateLimit,
+} = {}) {
   const router = Router()
 
   router.get('/csrf', (_request, response) => {
@@ -42,7 +46,7 @@ export function createAuthRouter({ UserModel = User, authenticateUser = authenti
     response.json({ success: true, data: { csrfToken } })
   })
 
-  router.post('/register', requireCsrf, authRateLimit, async (request, response) => {
+  router.post('/register', requireCsrf, rateLimiter, async (request, response) => {
     const { name, email, password } = request.body ?? {}
     const unexpectedFields = Object.keys(request.body ?? {}).filter(
       (field) => !['name', 'email', 'password'].includes(field),
@@ -95,7 +99,7 @@ export function createAuthRouter({ UserModel = User, authenticateUser = authenti
     }
   })
 
-  router.post('/login', requireCsrf, authRateLimit, async (request, response) => {
+  router.post('/login', requireCsrf, rateLimiter, async (request, response) => {
     const { email, password } = request.body ?? {}
     if (
       typeof email !== 'string' ||
@@ -139,4 +143,5 @@ export function createAuthRouter({ UserModel = User, authenticateUser = authenti
   return router
 }
 
+export { authRateLimit }
 export default createAuthRouter()

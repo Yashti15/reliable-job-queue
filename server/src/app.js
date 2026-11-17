@@ -11,7 +11,19 @@ import uploadsRoutes from './routes/uploads.routes.js'
 import { authenticate } from './auth/auth.middleware.js'
 import { requireCsrf } from './auth/csrf.js'
 
+export function resolveTrustProxy(configured = process.env.TRUST_PROXY) {
+  if (configured !== undefined && typeof configured === 'string' && configured.trim() !== '') {
+    const trimmed = configured.trim()
+    if (trimmed.toLowerCase() === 'false' || trimmed === '0') return false
+    const parsed = Number(trimmed)
+    if (Number.isInteger(parsed) && parsed > 0) return parsed
+  }
+  return 1
+}
+
 const app = express()
+
+app.set('trust proxy', resolveTrustProxy())
 
 function allowedOrigins() {
   const configured = process.env.CLIENT_ORIGIN

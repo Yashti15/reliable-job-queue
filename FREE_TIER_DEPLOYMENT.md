@@ -17,9 +17,9 @@
    │  - Framework: React 19 + Vite 7 + Tailwind CSS 4             │
    │  - Hosting: Vercel Global Edge Network                       │
    │  - URL: https://<your-app>.vercel.app                        │
-   │  - Routing: SPA rewrite rule via client/vercel.json          │
+   │  - Routing: SPA + API reverse proxy via client/vercel.json   │
    └──────────────────────────────┬───────────────────────────────┘
-                                  │ Cross-Origin HTTPS API + WSS
+                                  │ HTTPS (/api/* proxied) + WSS
                                   ▼
    ┌──────────────────────────────────────────────────────────────┐
    │             RENDER FREE WEB SERVICE (BACKEND)                │
@@ -28,7 +28,7 @@
    │  - URL: https://<your-service>.onrender.com                  │
    │  - Port: Dynamic $PORT injected by Render                    │
    │  - Health Check: GET /health (returns 200 OK)                │
-   │  - Security: SameSite=None; Secure cookies + CSRF Token      │
+   │  - Security: First-party cookies via Vercel Edge Proxy       │
    └──────────────────────────────┬───────────────────────────────┘
                                   │ mongodb+srv://
                                   ▼
@@ -94,7 +94,7 @@ Configure in **Vercel Dashboard $\rightarrow$ Project Settings $\rightarrow$ Env
 
 | Variable Name | Required | Example Value | Purpose |
 | :--- | :---: | :--- | :--- |
-| `VITE_API_BASE_URL` | **Yes** | `https://<your-render-service>.onrender.com/api` | Base URL used by Axios and Socket.IO |
+| `VITE_API_BASE_URL` | Optional | `/api` | Base URL used by Axios (defaults to `/api`). Proxied by `client/vercel.json` to Render, ensuring 100% first-party cookies on Safari, Brave, Chrome Incognito, and Firefox. |
 
 ---
 
@@ -173,7 +173,7 @@ Obtain from **MongoDB Atlas Dashboard**:
    - **Install Command**: `npm ci` (detected automatically)
 5. Expand **Environment Variables**:
    - Key: `VITE_API_BASE_URL`
-   - Value: `https://<your-render-service>.onrender.com/api`
+   - Value: `/api` *(or leave unset, as `client/src/api/jobs.js` defaults to `/api` which matches the rewrite in `client/vercel.json`)*
 6. Click **Deploy**.
 7. In ~60 seconds, your frontend will be live at:
    `https://<your-app>.vercel.app`

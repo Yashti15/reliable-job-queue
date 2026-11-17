@@ -2,6 +2,14 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "rewrites": [
     {
+      "source": "/api/:path*",
+      "destination": "https://reliable-job-queue-bnjm.onrender.com/api/:path*"
+    },
+    {
+      "source": "/health",
+      "destination": "https://reliable-job-queue-bnjm.onrender.com/health"
+    },
+    {
       "source": "/(.*)",
       "destination": "/index.html"
     }
