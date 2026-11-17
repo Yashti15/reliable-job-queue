@@ -135,6 +135,7 @@ export function createImageHandler({
         width: outputInfo.width,
         height: outputInfo.height,
       })
+      await reportProgress?.({ percent: 100, stage: 'completed', message: 'Image processing completed' })
       return imageResult(asset, operation, outputFormat)
     } catch (error) {
       if (saved) {

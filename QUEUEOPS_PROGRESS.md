@@ -150,6 +150,37 @@ This document tracks the end-to-end implementation of the QueueOps Reliable Asyn
 
 ---
 
+## End-to-End Workflow Verification Results
+
+A complete verification run was performed against the live application runtime, standalone background worker, and actual MongoDB Atlas M0 cluster.
+
+| # | Feature / Workflow | Test Performed | Actual Result | Evidence | Remaining Issue |
+|---|---|---|---|---|---|
+| 1 | Register and Log in | Registered User A via `POST /api/auth/register`, verified `Set-Cookie` session, verified identity with `GET /api/auth/me`, and verified re-login with `POST /api/auth/login`. | PASSED | User `verify-a-...@queueops.test` registered (201), authenticated via HttpOnly `rq_session` cookie, `me` returned valid profile, login returned 200. | None |
+| 2 | PDF Job Generation & Download | Created `generate_pdf` job via API, processed with background worker using PDFKit, and downloaded artifact via `/api/jobs/:id/artifacts/:artifactId`. | PASSED | Job completed (100% progress), generated 2,678 byte valid PDF file beginning with `%PDF-` magic number, verified download response with `Content-Type: application/pdf`. | None |
+| 3 | Real Image Processing | Uploaded 120x80 PNG via `/api/uploads/images`, queued `process_image` job with Sharp resize to 60x40 WebP, processed with worker, downloaded artifact. | PASSED | Job completed (100% progress), downloaded WebP output artifact (78 bytes), inspected and confirmed format `webp`, width `60`, and height `40` using Sharp metadata. | None |
+| 4 | Email Processing & Honest Demo Mode | Submitted `send_email` job to `operator@example.test`, processed with worker under configured `EMAIL_DEMO_MODE=true`. | PASSED | Job completed cleanly with `providerMessageId` prefix `demo_` (`demo_89e8c689-...`). Confirmed safe simulated acceptance with zero external API calls and zero provider charges. | None |
+| 5 | Live Socket.IO Updates | Handshaked via `GET /api/auth/socket-token`, connected Socket.IO client, submitted new job, verified real-time events. | PASSED | Socket connected successfully with ticket, received 5 real-time events (`job:created`, `job:progress` with stages/percentages, `job:completed`) matching the job ID. | None |
+| 6 | Search, Filter & Paginate Jobs | Tested `limit=2` pagination, `type=generate_pdf` filter, `status=completed` filter, and regex-safe text query `q=generate_pdf`. | PASSED | Pagination correctly chunked page 1 of 2, type filter returned strictly PDF jobs, status filter returned strictly completed jobs, text search returned matching records. | None |
+| 7 | Cancel a Pending Job | Submitted job with future `runAt` (1h), called `DELETE /api/jobs/:id`, checked subsequent retrieval. | PASSED | DELETE returned `200` with `{ cancelled: true }`. Subsequent `GET /api/jobs/:id` returned `404 NOT_FOUND` confirming atomic removal from queue. | None |
+| 8 | Retry a Failed Job | Submitted failed job, called `POST /api/jobs/:id/retry`, inspected updated document. | PASSED | Endpoint returned `200`, status reset to `pending`, attempts reset to 0, and `replayHistory` appended previous failure reason. | None |
+| 9 | Dead-Letter Queue & Replay | Created dead job with `maxAttempts: 3`, queried `GET /api/jobs/dead`, called `POST /api/jobs/:id/replay`. | PASSED | Job listed in DLQ, replayed successfully (status returned to `pending`, attempts reset to 0, `replayCount` incremented to 1). | None |
+| 10 | Attempt History Timeline | Inspected completed job in MongoDB document and API response. | PASSED | `attemptHistory` array contained full audit timeline: attempt 1, workerId `test-worker-...`, execution duration 784ms, startedAt, and finishedAt. | None |
+| 11 | Multi-Tenant User Isolation | Registered User B, attempted to view, download artifact, retry, cancel, or list User A's jobs. | PASSED | User B received strict `404 NOT_FOUND` across job record, artifact download, retry endpoint, and cancel endpoint. User B's job list contained 0 of User A's jobs. | None |
+| 12 | Analytics vs MongoDB Data | Queried `GET /api/analytics` as User A, queried MongoDB Atlas collection directly for matching window. | PASSED | Exact mathematical match: total jobs (6), completed (4), pending (2), and byType distribution sum (6) matched MongoDB Atlas counts identically. | None |
+
+---
+
+### Bug Fixes Applied During Verification
+1. **Queue Event Schema Enum Validation (`server/src/models/queue-event.model.js`)**:
+   - Added `'job:progress'` to the `queueEventSchema.name.enum` array so progress events are validated and persisted to `queue_events` collection without `ValidationError`.
+2. **PDF Handler Progress Completion (`server/src/worker/pdf-handler.js`)**:
+   - Added final `await reportProgress?.({ percent: 100, stage: 'completed', message: 'PDF report generated and saved' })` call upon saving artifact before returning `pdfResult`.
+3. **Image Handler Progress Completion (`server/src/worker/image-handler.js`)**:
+   - Added final `await reportProgress?.({ percent: 100, stage: 'completed', message: 'Image processing completed' })` call upon saving artifact before returning `imageResult`.
+
+---
+
 ### Working Environment Constraints
 - Local branch: `development`
 - Remote branch: `origin/development`

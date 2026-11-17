@@ -49,6 +49,7 @@ export function createPdfHandler({
         mediaType: 'application/pdf',
         sizeBytes: saved.sizeBytes,
       })
+      await reportProgress?.({ percent: 100, stage: 'completed', message: 'PDF report generated and saved' })
       return pdfResult(asset, report.title)
     } catch (error) {
       if (saved) {
