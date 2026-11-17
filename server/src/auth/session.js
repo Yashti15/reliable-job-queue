@@ -3,6 +3,7 @@ import jwt from 'jsonwebtoken'
 export const sessionCookieName = 'rq_session'
 export const csrfCookieName = 'rq_csrf'
 export const sessionDurationSeconds = 30 * 60
+export const socketTicketDurationSeconds = 120
 
 export function validateAuthConfiguration() {
   jwtSecret()
@@ -57,6 +58,27 @@ export function verifySession(token) {
     algorithms: ['HS256'],
     issuer: 'reliable-job-queue',
     audience: 'reliable-job-queue-client',
+  })
+}
+
+export function signSocketToken(userId, sessionExpiresAt) {
+  const payload = { sub: String(userId) }
+  if (typeof sessionExpiresAt === 'number' && Number.isFinite(sessionExpiresAt)) {
+    payload.sessionExp = Math.floor(sessionExpiresAt)
+  }
+  return jwt.sign(payload, jwtSecret(), {
+    algorithm: 'HS256',
+    expiresIn: socketTicketDurationSeconds,
+    issuer: 'reliable-job-queue',
+    audience: 'reliable-job-queue-socket',
+  })
+}
+
+export function verifySocketToken(token) {
+  return jwt.verify(token, jwtSecret(), {
+    algorithms: ['HS256'],
+    issuer: 'reliable-job-queue',
+    audience: ['reliable-job-queue-socket', 'reliable-job-queue-client'],
   })
 }
 

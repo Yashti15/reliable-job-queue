@@ -1,7 +1,7 @@
 import { Server as SocketIOServer } from 'socket.io'
 import User from '../models/user.model.js'
 import QueueEvent from '../models/queue-event.model.js'
-import { sessionCookieName, verifySession } from '../auth/session.js'
+import { sessionCookieName, verifySocketToken } from '../auth/session.js'
 
 function allowedOrigins() {
   const configured = process.env.CLIENT_ORIGIN
@@ -39,9 +39,14 @@ function safeErrorName(error) {
 }
 
 async function resolveSocketUser(token, UserModel) {
-  const claims = verifySession(token)
+  const claims = verifySocketToken(token)
   const user = await UserModel.findById(claims.sub).select('_id').lean()
-  return user ? { userId: String(user._id), expiresAt: claims.exp * 1000 } : null
+  if (!user) return null
+  const expiresAt =
+    typeof claims.sessionExp === 'number' && Number.isFinite(claims.sessionExp)
+      ? claims.sessionExp * 1000
+      : claims.exp * 1000
+  return { userId: String(user._id), expiresAt }
 }
 
 export function createSocketServer(
@@ -65,7 +70,9 @@ export function createSocketServer(
   })
 
   io.use(async (socket, next) => {
-    const token = getCookie(socket.request.headers.cookie, sessionCookieName)
+    const token =
+      socket.handshake.auth?.token ||
+      getCookie(socket.request.headers.cookie, sessionCookieName)
     if (!token) {
       next(new Error('Authentication required.'))
       return

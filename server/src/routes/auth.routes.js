@@ -9,6 +9,9 @@ import {
   sessionCookieName,
   sessionCookieOptions,
   signSession,
+  signSocketToken,
+  socketTicketDurationSeconds,
+  verifySession,
 } from '../auth/session.js'
 
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
@@ -34,6 +37,22 @@ function safeUser(user) {
   return { id: String(user._id), name: user.name, email: user.email }
 }
 
+export function issueSocketToken(userId, sessionToken) {
+  let sessionExp
+  if (sessionToken) {
+    try {
+      const claims = verifySession(sessionToken)
+      sessionExp = claims.exp
+    } catch {
+      // Fall back to default
+    }
+  }
+  return {
+    socketToken: signSocketToken(userId, sessionExp),
+    expiresIn: socketTicketDurationSeconds,
+  }
+}
+
 export function createAuthRouter({
   UserModel = User,
   authenticateUser = authenticate,
@@ -44,6 +63,12 @@ export function createAuthRouter({
   router.get('/csrf', (_request, response) => {
     const csrfToken = issueCsrfToken(response)
     response.json({ success: true, data: { csrfToken } })
+  })
+
+  router.get('/socket-token', authenticateUser, (request, response) => {
+    const sessionCookie = request.cookies?.[sessionCookieName]
+    const data = issueSocketToken(request.userId, sessionCookie)
+    response.json({ success: true, data })
   })
 
   router.post('/register', requireCsrf, rateLimiter, async (request, response) => {

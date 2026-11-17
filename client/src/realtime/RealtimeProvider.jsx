@@ -1,6 +1,6 @@
 import { createContext, useContext, useEffect, useMemo, useState } from 'react'
 import { io } from 'socket.io-client'
-import { getSocketOrigin } from '../api/jobs.js'
+import { getSocketOrigin, getSocketToken } from '../api/jobs.js'
 
 const RealtimeContext = createContext({
   connectionState: 'connecting',
@@ -27,7 +27,24 @@ export function RealtimeProvider({ children }) {
   const [workerRefreshVersion, setWorkerRefreshVersion] = useState(0)
 
   useEffect(() => {
-    const socket = io(getSocketOrigin(), { autoConnect: false, withCredentials: true })
+    let unmounted = false
+    const socket = io(getSocketOrigin(), {
+      autoConnect: false,
+      withCredentials: true,
+      transports: ['websocket', 'polling'],
+      auth: async (cb) => {
+        try {
+          const { data } = await getSocketToken()
+          if (!unmounted) {
+            cb({ token: data?.data?.socketToken })
+          }
+        } catch {
+          if (!unmounted) {
+            cb({})
+          }
+        }
+      },
+    })
     const refreshJobs = () => setJobRefreshVersion((version) => version + 1)
     const refreshWorkers = () => setWorkerRefreshVersion((version) => version + 1)
     const onConnect = () => {
@@ -52,6 +69,7 @@ export function RealtimeProvider({ children }) {
     socket.connect()
 
     return () => {
+      unmounted = true
       socket.off('connect', onConnect)
       socket.off('disconnect', onDisconnect)
       socket.off('connect_error', onConnectError)

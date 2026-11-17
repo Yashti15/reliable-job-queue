@@ -3,7 +3,8 @@ import test from 'node:test'
 import express from 'express'
 import { rateLimit } from 'express-rate-limit'
 import app, { resolveTrustProxy } from '../app.js'
-import { authRateLimit } from './auth.routes.js'
+import { authRateLimit, createAuthRouter, issueSocketToken } from './auth.routes.js'
+import { signSession, verifySession, verifySocketToken } from '../auth/session.js'
 
 test('resolveTrustProxy configures single trusted proxy hop and never blindly trusts true', () => {
   assert.equal(resolveTrustProxy(undefined), 1, 'Default must be 1 proxy hop for Render')
@@ -188,4 +189,80 @@ test('rate limiting correctly tracks and isolates requests by proxy-derived clie
   const b1 = makeMock('198.51.100.20')
   await callLimiter(b1)
   assert.equal(b1.getStatus(), 200, 'Different client IP must have separate rate limit bucket')
+})
+
+test('issueSocketToken generates short-lived socket ticket with session expiry and strictly rejects session verification', () => {
+  process.env.AUTH_JWT_SECRET = 'test-secret-with-at-least-thirty-two-bytes'
+  const userId = '6afafb0ca224b17e5adcbcf0'
+  const sessionToken = signSession(userId)
+  const issued = issueSocketToken(userId, sessionToken)
+
+  assert.ok(issued.socketToken, 'Must generate socketToken')
+  assert.equal(issued.expiresIn, 120, 'Ticket duration must be 120 seconds')
+
+  const claims = verifySocketToken(issued.socketToken)
+  assert.equal(claims.sub, userId, 'Subject must match userId')
+  assert.equal(claims.aud, 'reliable-job-queue-socket', 'Audience must be reliable-job-queue-socket')
+  assert.ok(claims.sessionExp > 0, 'Must record parent session expiration time')
+
+  // Verify the socket ticket cannot be used to authenticate normal session requests
+  assert.throws(
+    () => verifySession(issued.socketToken),
+    /jwt audience invalid/,
+    'verifySession must reject socket ticket due to audience mismatch',
+  )
+})
+
+test('createAuthRouter mounts GET /socket-token with authentication middleware and responds with ticket', () => {
+  process.env.AUTH_JWT_SECRET = 'test-secret-with-at-least-thirty-two-bytes'
+  const mockUser = { _id: '6afafb0ca224b17e5adcbcf0', name: 'Test Operator', email: 'op@example.com' }
+  const mockAuth = (req, res, next) => {
+    if (req.headers?.authorization === 'Bearer allowed') {
+      req.authUser = mockUser
+      req.userId = mockUser._id
+      next()
+    } else {
+      res.status(401).json({ success: false, error: { code: 'AUTH_REQUIRED', message: 'Authentication is required.' } })
+    }
+  }
+
+  const router = createAuthRouter({ authenticateUser: mockAuth })
+  const socketRoute = router.stack.find((layer) => layer.route?.path === '/socket-token')
+  assert.ok(socketRoute, 'Router must mount /socket-token')
+  assert.equal(socketRoute.route.stack.length, 2, 'Route must have auth middleware and handler')
+
+  // Test unauthenticated invocation of the route middleware
+  let unauthCode = null
+  let unauthBody = null
+  const unauthRes = {
+    status(c) {
+      unauthCode = c
+      return this
+    },
+    json(b) {
+      unauthBody = b
+      return this
+    },
+  }
+  socketRoute.route.stack[0].handle({ headers: {} }, unauthRes, () => {})
+  assert.equal(unauthCode, 401)
+  assert.equal(unauthBody?.error?.code, 'AUTH_REQUIRED')
+
+  // Test authenticated execution through the route handler
+  let authBody = null
+  const authRes = {
+    json(b) {
+      authBody = b
+      return this
+    },
+  }
+  const authReq = { userId: mockUser._id, cookies: {} }
+  socketRoute.route.stack[1].handle(authReq, authRes)
+  assert.equal(authBody?.success, true)
+  assert.ok(authBody?.data?.socketToken)
+  assert.equal(authBody?.data?.expiresIn, 120)
+
+  const claims = verifySocketToken(authBody.data.socketToken)
+  assert.equal(claims.sub, mockUser._id)
+  assert.equal(claims.aud, 'reliable-job-queue-socket')
 })

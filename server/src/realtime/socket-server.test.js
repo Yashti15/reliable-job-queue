@@ -155,3 +155,100 @@ test('Socket.IO authenticates clients and isolates events in server-controlled u
   await disconnected
   assert.equal(clientA.connected, false)
 })
+
+test('Socket.IO authenticates via auth handshake token, rejects invalid/expired tickets, and reconnects', { timeout: 10_000 }, async (context) => {
+  const model = createEventModel()
+  const httpServer = createServer()
+  let ticketVersion = 1
+  const { io, bridge } = createSocketServer(httpServer, {
+    EventModel: model,
+    resolveUser: async (token) => {
+      if (token === 'valid-ticket' || token === 'reconnect-ticket') {
+        return { userId: 'user-token-owner', expiresAt: Date.now() + 60_000 }
+      }
+      if (token === 'expired-ticket') {
+        const err = new Error('jwt expired')
+        err.name = 'TokenExpiredError'
+        throw err
+      }
+      if (token === 'invalid-ticket') {
+        const err = new Error('invalid signature')
+        err.name = 'JsonWebTokenError'
+        throw err
+      }
+      return null
+    },
+    logger: { info() {}, error() {} },
+  })
+  await bridge.ready
+  await new Promise((resolve) => httpServer.listen(0, '127.0.0.1', resolve))
+  const url = `http://127.0.0.1:${httpServer.address().port}`
+
+  // 1. Valid auth token
+  const validClient = createSocketClient(url, {
+    auth: { token: 'valid-ticket' },
+    reconnection: false,
+    timeout: 3000,
+  })
+
+  // 2. Expired auth token
+  const expiredClient = createSocketClient(url, {
+    auth: { token: 'expired-ticket' },
+    reconnection: false,
+    timeout: 3000,
+  })
+
+  // 3. Invalid auth token
+  const invalidClient = createSocketClient(url, {
+    auth: { token: 'invalid-ticket' },
+    reconnection: false,
+    timeout: 3000,
+  })
+
+  // 4. Missing auth token and cookie
+  const emptyClient = createSocketClient(url, {
+    auth: {},
+    reconnection: false,
+    timeout: 3000,
+  })
+
+  // 5. Dynamic reconnection client
+  let activeToken = 'valid-ticket'
+  const reconnectClient = createSocketClient(url, {
+    auth: (cb) => cb({ token: activeToken }),
+    reconnection: true,
+    reconnectionDelay: 50,
+    timeout: 3000,
+  })
+
+  context.after(async () => {
+    validClient.disconnect()
+    expiredClient.disconnect()
+    invalidClient.disconnect()
+    emptyClient.disconnect()
+    reconnectClient.disconnect()
+    await bridge.stop()
+    await new Promise((resolve) => io.close(resolve))
+  })
+
+  await once(validClient, 'connect', { signal: AbortSignal.timeout(4000) })
+  assert.equal(validClient.connected, true, 'Valid auth ticket must connect successfully')
+
+  const expiredError = once(expiredClient, 'connect_error', { signal: AbortSignal.timeout(4000) })
+  assert.match((await expiredError)[0].message, /Authentication required/)
+
+  const invalidError = once(invalidClient, 'connect_error', { signal: AbortSignal.timeout(4000) })
+  assert.match((await invalidError)[0].message, /Authentication required/)
+
+  const emptyError = once(emptyClient, 'connect_error', { signal: AbortSignal.timeout(4000) })
+  assert.match((await emptyError)[0].message, /Authentication required/)
+
+  await once(reconnectClient, 'connect', { signal: AbortSignal.timeout(4000) })
+  assert.equal(reconnectClient.connected, true)
+
+  // Simulate ticket refresh upon reconnect
+  activeToken = 'reconnect-ticket'
+  reconnectClient.io.engine.close()
+  await once(reconnectClient, 'connect', { signal: AbortSignal.timeout(4000) })
+  assert.equal(reconnectClient.connected, true, 'Client must reconnect using updated ticket from auth callback')
+})

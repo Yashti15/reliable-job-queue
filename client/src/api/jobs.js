@@ -49,9 +49,23 @@ api.interceptors.response.use(
   },
 )
 
-export function getSocketOrigin() {
+export function getSocketOrigin(env = import.meta.env) {
+  if (env?.VITE_SOCKET_URL) {
+    return env.VITE_SOCKET_URL
+  }
+  if (env?.VITE_WS_URL) {
+    return env.VITE_WS_URL
+  }
   const windowOrigin = typeof window !== 'undefined' ? window.location?.origin : 'http://localhost:5173'
-  return new URL(import.meta.env?.VITE_API_BASE_URL || '/api', windowOrigin).origin
+  const apiBase = env?.VITE_API_BASE_URL || '/api'
+  if (apiBase.startsWith('http://') || apiBase.startsWith('https://')) {
+    return new URL(apiBase).origin
+  }
+  return windowOrigin
+}
+
+export function getSocketToken() {
+  return api.get('/auth/socket-token')
 }
 
 export async function getCsrfToken() {

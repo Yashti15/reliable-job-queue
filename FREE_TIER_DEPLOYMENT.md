@@ -95,6 +95,7 @@ Configure in **Vercel Dashboard $\rightarrow$ Project Settings $\rightarrow$ Env
 | Variable Name | Required | Example Value | Purpose |
 | :--- | :---: | :--- | :--- |
 | `VITE_API_BASE_URL` | Optional | `/api` | Base URL used by Axios (defaults to `/api`). Proxied by `client/vercel.json` to Render, ensuring 100% first-party cookies on Safari, Brave, Chrome Incognito, and Firefox. |
+| `VITE_SOCKET_URL` | **Yes** | `https://<your-render-service>.onrender.com` | Dedicated Render WebSocket origin for direct Socket.IO WSS connection (bypassing Vercel's non-WebSocket proxy). |
 
 ---
 
@@ -174,6 +175,8 @@ Obtain from **MongoDB Atlas Dashboard**:
 5. Expand **Environment Variables**:
    - Key: `VITE_API_BASE_URL`
    - Value: `/api` *(or leave unset, as `client/src/api/jobs.js` defaults to `/api` which matches the rewrite in `client/vercel.json`)*
+   - Key: `VITE_SOCKET_URL`
+   - Value: `https://<your-render-service>.onrender.com`
 6. Click **Deploy**.
 7. In ~60 seconds, your frontend will be live at:
    `https://<your-app>.vercel.app`
