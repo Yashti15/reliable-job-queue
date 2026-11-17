@@ -148,7 +148,23 @@ export function createWorker({
       let handlerError
       let handlerFailed = false
       const executionStartedAt = monotonicNow()
+      const executionStartDate = now()
       const heartbeat = startHeartbeat(job)
+
+      const reportProgress = async (progressData) => {
+        if (typeof queue.updateJobProgress === 'function' && !heartbeat.leaseLost) {
+          try {
+            await queue.updateJobProgress(job, workerId, progressData, { now: now() })
+          } catch (progressError) {
+            logger.warn('Progress update could not be persisted.', {
+              jobId: String(job._id),
+              workerId,
+              errorName: safeErrorName(progressError),
+            })
+          }
+        }
+      }
+
       try {
         const handler = getHandler(job.type)
         if (!handler) {
@@ -162,6 +178,7 @@ export function createWorker({
           workerId,
           job,
           logger,
+          reportProgress,
         })
       } catch (error) {
         handlerFailed = true
@@ -177,11 +194,21 @@ export function createWorker({
         return true
       }
 
+      const attemptInfo = {
+        attempt: (job.attempts ?? 0) + 1,
+        workerId,
+        startedAt: executionStartDate,
+        finishedAt: now(),
+        durationMs: executionDurationMs,
+        error: handlerFailed ? safeErrorName(handlerError) : undefined,
+      }
+
       if (handlerFailed) {
         try {
           const failedJob = await queue.failJob(job, workerId, handlerError, {
             now: now(),
             retryOptions,
+            attemptInfo,
           })
           if (!failedJob) {
             logger.warn('Job failure update rejected because worker ownership changed.', {
@@ -218,6 +245,7 @@ export function createWorker({
           now(),
           undefined,
           result,
+          { attemptInfo },
         )
         if (!completedJob) {
           logger.warn('Job completion rejected because worker ownership changed.', {

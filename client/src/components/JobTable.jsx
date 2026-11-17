@@ -16,7 +16,7 @@ function shortenId(id = '') {
   return `${String(id).slice(0, 8)}…${String(id).slice(-5)}`
 }
 
-export function JobTable({ jobs, onCancel, cancellingId }) {
+export function JobTable({ jobs, onCancel, cancellingId, onRetry, retryingId }) {
   return (
     <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
       <div className="overflow-x-auto">
@@ -44,7 +44,23 @@ export function JobTable({ jobs, onCancel, cancellingId }) {
                     {shortenId(job._id)}
                   </p>
                 </td>
-                <td className="px-4 py-4"><StatusBadge status={job.status} /></td>
+                <td className="px-4 py-4">
+                  <StatusBadge status={job.status} />
+                  {job.status === 'processing' && typeof job.progress?.percent === 'number' && (
+                    <div className="mt-1.5 w-24">
+                      <div className="flex justify-between text-[10px] font-medium text-slate-500">
+                        <span>{job.progress.stage || 'running'}</span>
+                        <span>{job.progress.percent}%</span>
+                      </div>
+                      <div className="mt-0.5 h-1.5 w-full overflow-hidden rounded-full bg-slate-100">
+                        <div
+                          className="h-full rounded-full bg-sky-500 transition-all duration-300"
+                          style={{ width: `${Math.max(5, job.progress.percent)}%` }}
+                        />
+                      </div>
+                    </div>
+                  )}
+                </td>
                 <td className="px-4 py-4">
                   <span className={`text-xs font-semibold capitalize ${job.priority === 'high' ? 'text-rose-600' : job.priority === 'low' ? 'text-slate-500' : 'text-slate-700'}`}>
                     {job.priority || 'normal'}
@@ -58,16 +74,28 @@ export function JobTable({ jobs, onCancel, cancellingId }) {
                 <td className="px-4 py-4 text-xs text-slate-500">{formatDate(job.runAt)}</td>
                 <td className="px-4 py-4 text-xs text-slate-500">{job.workerId || '—'}</td>
                 <td className="px-4 py-4 text-right">
-                  {job.status === 'pending' && onCancel && (
-                    <button
-                      type="button"
-                      disabled={cancellingId === job._id}
-                      onClick={() => onCancel(job)}
-                      className="rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs font-semibold text-slate-600 hover:border-rose-200 hover:text-rose-700 disabled:opacity-50"
-                    >
-                      {cancellingId === job._id ? 'Cancelling…' : 'Cancel'}
-                    </button>
-                  )}
+                  <div className="flex items-center justify-end gap-2">
+                    {job.status === 'pending' && onCancel && (
+                      <button
+                        type="button"
+                        disabled={cancellingId === job._id}
+                        onClick={() => onCancel(job)}
+                        className="rounded-lg border border-slate-200 px-2.5 py-1.5 text-xs font-semibold text-slate-600 hover:border-rose-200 hover:text-rose-700 disabled:opacity-50"
+                      >
+                        {cancellingId === job._id ? 'Cancelling…' : 'Cancel'}
+                      </button>
+                    )}
+                    {['failed', 'dead'].includes(job.status) && onRetry && (
+                      <button
+                        type="button"
+                        disabled={retryingId === job._id}
+                        onClick={() => onRetry(job)}
+                        className="rounded-lg border border-indigo-200 bg-indigo-50 px-2.5 py-1.5 text-xs font-semibold text-indigo-700 hover:bg-indigo-100 disabled:opacity-50"
+                      >
+                        {retryingId === job._id ? 'Retrying…' : 'Retry'}
+                      </button>
+                    )}
+                  </div>
                 </td>
               </tr>
             ))}

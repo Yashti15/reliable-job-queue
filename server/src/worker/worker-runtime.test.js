@@ -376,3 +376,71 @@ test('worker requires heartbeat interval to be shorter than lease duration', () 
     /heartbeatIntervalMs must be positive and shorter/,
   )
 })
+
+test('worker provides reportProgress and passes attemptInfo on completion and failure', async () => {
+  let progressReported = null
+  let completionAttemptInfo = null
+  let failureAttemptInfo = null
+
+  // 1. Successful execution with progress
+  const successWorker = createWorker({
+    workerId: 'worker-progress-1',
+    pollIntervalMs: 1000,
+    queue: {
+      async claimNextJob() {
+        return { _id: 'job-progress', type: 'progress_type', payload: {}, attempts: 0 }
+      },
+      async updateJobProgress(job, workerId, progressData) {
+        progressReported = { ...progressData, workerId }
+      },
+      async completeJob(job, workerId, completedAt, eventPublisher, result, options) {
+        completionAttemptInfo = options?.attemptInfo
+        return { ...job, status: 'completed' }
+      },
+    },
+    getHandler: () => async (payload, context) => {
+      await context.reportProgress({ percent: 50, stage: 'halfway', message: 'In progress' })
+      return { success: true }
+    },
+    logger: { info() {}, warn() {}, error() {} },
+  })
+
+  await successWorker.processNextJob()
+  assert.deepEqual(progressReported, {
+    percent: 50,
+    stage: 'halfway',
+    message: 'In progress',
+    workerId: 'worker-progress-1',
+  })
+  assert.ok(completionAttemptInfo)
+  assert.equal(completionAttemptInfo.attempt, 1)
+  assert.equal(completionAttemptInfo.workerId, 'worker-progress-1')
+  assert.equal(completionAttemptInfo.error, undefined)
+
+  // 2. Failed execution with attemptInfo
+  const failWorker = createWorker({
+    workerId: 'worker-fail-1',
+    pollIntervalMs: 1000,
+    queue: {
+      async claimNextJob() {
+        return { _id: 'job-fail', type: 'fail_type', payload: {}, attempts: 1 }
+      },
+      async failJob(job, workerId, error, options) {
+        failureAttemptInfo = options?.attemptInfo
+        return { ...job, status: 'failed', attempts: 2 }
+      },
+    },
+    getHandler: () => async () => {
+      const err = new Error('Test handler explosion')
+      err.name = 'TestHandlerError'
+      throw err
+    },
+    logger: { info() {}, warn() {}, error() {} },
+  })
+
+  await failWorker.processNextJob()
+  assert.ok(failureAttemptInfo)
+  assert.equal(failureAttemptInfo.attempt, 2)
+  assert.equal(failureAttemptInfo.workerId, 'worker-fail-1')
+  assert.equal(failureAttemptInfo.error, 'TestHandlerError')
+})

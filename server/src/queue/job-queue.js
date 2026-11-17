@@ -177,10 +177,25 @@ export function completeJob(
   completedAt = new Date(),
   eventPublisher,
   result,
+  options = {},
 ) {
   const update = {
-    $set: { status: 'completed', completedAt },
+    $set: {
+      status: 'completed',
+      completedAt,
+      ...(job.progress
+        ? {
+            'progress.percent': 100,
+            'progress.stage': 'completed',
+            'progress.message': 'Job execution completed successfully.',
+            'progress.updatedAt': completedAt,
+          }
+        : {}),
+    },
     $unset: { lastError: 1, claimToken: 1, leaseExpiresAt: 1 },
+  }
+  if (options?.attemptInfo) {
+    update.$push = { attemptHistory: options.attemptInfo }
   }
   if (result !== undefined) {
     const safeResult = normalizeExecutionResult(result)
@@ -201,6 +216,38 @@ export function completeJob(
     })
 }
 
+export async function updateJobProgress(
+  job,
+  workerId,
+  progressData = {},
+  { now = new Date(), eventPublisher } = {},
+) {
+  const percent =
+    typeof progressData.percent === 'number' && Number.isFinite(progressData.percent)
+      ? Math.max(0, Math.min(100, Math.round(progressData.percent)))
+      : 0
+  const stage = typeof progressData.stage === 'string' ? progressData.stage.slice(0, 100) : ''
+  const message = typeof progressData.message === 'string' ? progressData.message.slice(0, 500) : ''
+
+  const progress = {
+    percent,
+    stage,
+    message,
+    updatedAt: now,
+  }
+
+  const updatedJob = await Job.findOneAndUpdate(
+    ownedUnexpiredClaim(job, workerId, now),
+    { $set: { progress } },
+    { new: true, runValidators: true },
+  ).lean()
+
+  if (updatedJob) {
+    await publishJobEvent('job:progress', updatedJob, eventPublisher)
+  }
+  return updatedJob
+}
+
 export function failJob(
   job,
   workerId,
@@ -210,6 +257,7 @@ export function failJob(
     retryOptions,
     random = Math.random,
     eventPublisher,
+    attemptInfo,
   } = {},
 ) {
   const errorName = safeErrorName(error)
@@ -226,30 +274,36 @@ export function failJob(
       )
     : undefined
 
+  const update = {
+    $inc: { attempts: 1 },
+    $set: {
+      status: willRetry ? 'pending' : 'dead',
+      lastError: safeMessage,
+      ...(!willRetry ? { deadAt: now } : {}),
+      ...(willRetry ? { runAt: nextRunAt } : {}),
+    },
+    $unset: {
+      workerId: 1,
+      claimToken: 1,
+      claimedAt: 1,
+      leaseExpiresAt: 1,
+      completedAt: 1,
+      result: 1,
+      progress: 1,
+      ...(willRetry ? { deadAt: 1 } : {}),
+    },
+  }
+  if (attemptInfo) {
+    update.$push = { attemptHistory: attemptInfo }
+  }
+
   return Job.findOneAndUpdate(
     {
       ...ownedUnexpiredClaim(job, workerId, now),
       attempts: job.attempts,
       maxAttempts: job.maxAttempts,
     },
-    {
-      $inc: { attempts: 1 },
-      $set: {
-        status: willRetry ? 'pending' : 'dead',
-        lastError: safeMessage,
-        ...(!willRetry ? { deadAt: now } : {}),
-        ...(willRetry ? { runAt: nextRunAt } : {}),
-      },
-      $unset: {
-        workerId: 1,
-        claimToken: 1,
-        claimedAt: 1,
-        leaseExpiresAt: 1,
-        completedAt: 1,
-        result: 1,
-        ...(willRetry ? { deadAt: 1 } : {}),
-      },
-    },
+    update,
     { new: true, runValidators: true },
   )
     .lean()

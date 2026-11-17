@@ -17,7 +17,7 @@ export function createImageHandler({
   store = fileStore,
   imageProcessor = sharp,
 } = {}) {
-  return async function processImage(payload, { job } = {}) {
+  return async function processImage(payload, { job, reportProgress } = {}) {
     const operation = validateImagePayload(payload)
     const ownerId = String(job?.ownerId ?? '')
     const jobId = String(job?._id ?? '')
@@ -34,8 +34,11 @@ export function createImageHandler({
       mediaType: { $in: ['image/jpeg', 'image/png', 'image/webp'] },
     }).lean()
     if (existing) {
+      await reportProgress?.({ percent: 100, stage: 'completed', message: 'Reusing previously completed image artifact' })
       return imageResult(existing, operation, existing.mediaType.slice(6))
     }
+
+    await reportProgress?.({ percent: 20, stage: 'reading', message: 'Loading uploaded image from storage' })
 
     const upload = await AssetModel.findOne({
       _id: operation.assetId,
@@ -67,6 +70,7 @@ export function createImageHandler({
     let outputInfo
     let outputFormat
     try {
+      await reportProgress?.({ percent: 50, stage: 'processing', message: 'Applying image transformations with Sharp' })
       const pipeline = imageProcessor(input, {
         limitInputPixels: maxInputPixels,
         failOn: 'error',
@@ -118,6 +122,7 @@ export function createImageHandler({
     }
     let saved
     try {
+      await reportProgress?.({ percent: 85, stage: 'saving', message: 'Saving processed image artifact' })
       saved = await store.save(ownerId, 'outputs', format.extension, outputBuffer)
       const asset = await AssetModel.create({
         ownerId,

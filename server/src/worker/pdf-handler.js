@@ -9,7 +9,7 @@ export function createPdfHandler({
   store = fileStore,
   now = () => new Date(),
 } = {}) {
-  return async function generatePdf(payload, { job } = {}) {
+  return async function generatePdf(payload, { job, reportProgress } = {}) {
     const report = validatePdfPayload(payload)
     const { ownerId, jobId } = getExecutionIdentity(job)
     const existing = await AssetModel.findOne({
@@ -18,7 +18,10 @@ export function createPdfHandler({
       kind: 'output',
       mediaType: 'application/pdf',
     }).lean()
-    if (existing) return pdfResult(existing, report.title)
+    if (existing) {
+      await reportProgress?.({ percent: 100, stage: 'completed', message: 'Reusing existing PDF artifact' })
+      return pdfResult(existing, report.title)
+    }
 
     const generatedAt = now()
     if (!(generatedAt instanceof Date) || !Number.isFinite(generatedAt.getTime())) {
@@ -26,6 +29,7 @@ export function createPdfHandler({
         name: 'PdfGenerationError',
       })
     }
+    await reportProgress?.({ percent: 35, stage: 'rendering', message: 'Rendering PDF pages and typography' })
     const pdf = await renderReport(report, generatedAt)
     if (pdf.length > 10 * 1024 * 1024) {
       throw new JobHandlerError('Generated PDF exceeds the 10 MB output limit.', {
@@ -34,6 +38,7 @@ export function createPdfHandler({
     }
     let saved
     try {
+      await reportProgress?.({ percent: 80, stage: 'saving', message: 'Writing PDF artifact to secure file store' })
       saved = await store.save(ownerId, 'outputs', 'pdf', pdf)
       const asset = await AssetModel.create({
         ownerId,

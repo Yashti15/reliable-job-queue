@@ -57,10 +57,49 @@ test('job schema enables timestamps and a tenant-scoped unique idempotency index
   assert.equal(Job.schema.path('deadAt').instance, 'Date')
   assert.equal(Job.schema.path('replayCount').defaultValue, 0)
   assert.ok(Array.isArray(new Job({ type: 'test', payload: {} }).replayHistory))
+  assert.ok(Array.isArray(new Job({ type: 'test', payload: {} }).attemptHistory))
   assert.ok(
     indexes.some(
       ([fields]) =>
         fields.status === 1 && fields.deadAt === -1 && fields._id === -1,
     ),
   )
+})
+
+test('job schema supports progress tracking and attempt history', () => {
+  const validJob = new Job({
+    type: 'process_image',
+    payload: { assetId: '507f1f77bcf86cd799439011' },
+    progress: {
+      percent: 45,
+      stage: 'resizing',
+      message: 'Processing image dimensions',
+      updatedAt: new Date(),
+    },
+    attemptHistory: [
+      {
+        attempt: 1,
+        workerId: 'worker-node-1',
+        startedAt: new Date(Date.now() - 5000),
+        finishedAt: new Date(),
+        durationMs: 5000,
+        error: 'Transient storage error',
+      },
+    ],
+  })
+  assert.equal(validJob.validateSync(), undefined)
+  assert.equal(validJob.progress.percent, 45)
+  assert.equal(validJob.progress.stage, 'resizing')
+  assert.equal(validJob.attemptHistory.length, 1)
+  assert.equal(validJob.attemptHistory[0].attempt, 1)
+
+  const invalidProgress = new Job({
+    type: 'process_image',
+    payload: { assetId: '507f1f77bcf86cd799439011' },
+    progress: {
+      percent: 150, // exceeds max 100
+    },
+  })
+  const progressError = invalidProgress.validateSync()
+  assert.ok(progressError?.errors?.['progress.percent'])
 })

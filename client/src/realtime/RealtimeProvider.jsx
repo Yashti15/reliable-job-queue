@@ -11,6 +11,7 @@ const RealtimeContext = createContext({
 const lifecycleEvents = [
   'job:created',
   'job:claimed',
+  'job:progress',
   'job:completed',
   'job:failed',
   'job:retried',

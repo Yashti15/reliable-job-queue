@@ -53,3 +53,57 @@ test('JobTable renders job rows with status badges and cancel actions', () => {
   assert.ok(html.includes('Cancel'), 'Cancel button should be visible for pending job')
   assert.ok(html.includes('worker-1'))
 })
+
+test('JobTable renders progress bar for processing jobs', () => {
+  const jobs = [
+    {
+      _id: '507f1f77bcf86cd799439033',
+      type: 'process_image',
+      status: 'processing',
+      priority: 'high',
+      attempts: 1,
+      maxAttempts: 3,
+      createdAt: '2026-11-15T12:00:00Z',
+      runAt: '2026-11-15T12:00:00Z',
+      workerId: 'worker-2',
+      progress: {
+        percent: 65,
+        stage: 'resizing',
+      },
+    },
+  ]
+
+  const html = renderToStaticMarkup(React.createElement(JobTable, { jobs }))
+  assert.ok(html.includes('resizing'))
+  assert.ok(html.includes('65%'))
+})
+
+test('JobTable renders retry button for failed and dead jobs', () => {
+  const jobs = [
+    {
+      _id: '507f1f77bcf86cd799439044',
+      type: 'send_email',
+      status: 'failed',
+      attempts: 2,
+      maxAttempts: 3,
+      createdAt: '2026-11-15T12:00:00Z',
+    },
+    {
+      _id: '507f1f77bcf86cd799439055',
+      type: 'generate_pdf',
+      status: 'dead',
+      attempts: 3,
+      maxAttempts: 3,
+      createdAt: '2026-11-15T12:00:00Z',
+    },
+  ]
+
+  const html = renderToStaticMarkup(
+    React.createElement(JobTable, {
+      jobs,
+      onRetry: () => {},
+      retryingId: '',
+    }),
+  )
+  assert.ok(html.includes('Retry'))
+})

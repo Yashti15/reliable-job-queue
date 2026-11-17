@@ -12,6 +12,8 @@ export function JobsPanel({
   onRetry,
   onCancel,
   cancellingId,
+  onJobRetry,
+  retryingId,
   emptyTitle = 'No jobs found',
   emptyDescription = 'Jobs submitted to the queue will appear here.',
 }) {
@@ -35,7 +37,13 @@ export function JobsPanel({
   }
   return (
     <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
-      <JobTable jobs={jobs} onCancel={onCancel} cancellingId={cancellingId} />
+      <JobTable
+        jobs={jobs}
+        onCancel={onCancel}
+        cancellingId={cancellingId}
+        onRetry={onJobRetry}
+        retryingId={retryingId}
+      />
       <Pagination pagination={pagination} onPageChange={onPageChange} />
     </div>
   )

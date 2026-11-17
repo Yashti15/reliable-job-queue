@@ -97,6 +97,43 @@ const jobSchema = new mongoose.Schema(
       ],
       default: [],
     },
+    progress: {
+      percent: {
+        type: Number,
+        min: 0,
+        max: 100,
+        validate: (v) => v === undefined || (typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= 100),
+      },
+      stage: {
+        type: String,
+        trim: true,
+        maxlength: 100,
+      },
+      message: {
+        type: String,
+        trim: true,
+        maxlength: 500,
+      },
+      updatedAt: {
+        type: Date,
+      },
+    },
+    attemptHistory: {
+      type: [
+        new mongoose.Schema(
+          {
+            attempt: { type: Number, required: true, min: 1 },
+            workerId: { type: String, trim: true, maxlength: 200 },
+            startedAt: { type: Date, required: true },
+            finishedAt: { type: Date },
+            durationMs: { type: Number, min: 0 },
+            error: { type: String, trim: true, maxlength: 10000 },
+          },
+          { _id: false },
+        ),
+      ],
+      default: [],
+    },
     idempotencyKey: {
       type: String,
       trim: true,
@@ -119,6 +156,8 @@ jobSchema.index(
   },
 )
 jobSchema.index({ ownerId: 1, status: 1, createdAt: -1 })
+jobSchema.index({ ownerId: 1, type: 1, createdAt: -1 })
+jobSchema.index({ ownerId: 1, priority: 1, createdAt: -1 })
 jobSchema.index({ ownerId: 1, status: 1, deadAt: -1, _id: -1 })
 jobSchema.index({ createdAt: -1 })
 jobSchema.index({ status: 1, runAt: 1 })

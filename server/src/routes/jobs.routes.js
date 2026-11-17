@@ -28,6 +28,10 @@ const allowedCreateFields = new Set([
 ])
 const maxPageSize = 100
 
+function escapeRegex(text) {
+  return typeof text === 'string' ? text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') : ''
+}
+
 function sendError(response, status, code, message, details) {
   response.status(status).json({
     success: false,
@@ -392,7 +396,7 @@ export function createJobsRouter(
       return
     }
 
-    const { status } = request.query
+    const { status, type, priority, q, startDate, endDate } = request.query
     if (status !== undefined && !jobStatuses.includes(status)) {
       sendError(
         response,
@@ -403,9 +407,58 @@ export function createJobsRouter(
       return
     }
 
+    if (priority !== undefined && !priorities.includes(priority)) {
+      sendError(
+        response,
+        400,
+        'INVALID_PRIORITY',
+        `priority must be one of: ${priorities.join(', ')}.`,
+      )
+      return
+    }
+
+    let createdAtFilter
+    if (startDate !== undefined) {
+      const parsedStart = Date.parse(startDate)
+      if (!Number.isFinite(parsedStart)) {
+        sendError(response, 400, 'INVALID_DATE', 'startDate must be a valid date.')
+        return
+      }
+      createdAtFilter = { ...createdAtFilter, $gte: new Date(parsedStart) }
+    }
+    if (endDate !== undefined) {
+      const parsedEnd = Date.parse(endDate)
+      if (!Number.isFinite(parsedEnd)) {
+        sendError(response, 400, 'INVALID_DATE', 'endDate must be a valid date.')
+        return
+      }
+      createdAtFilter = { ...createdAtFilter, $lte: new Date(parsedEnd) }
+    }
+
     const filter = {
       ownerId: request.authUser._id,
       ...(status ? { status } : {}),
+      ...(type && typeof type === 'string' && type.trim() ? { type: type.trim() } : {}),
+      ...(priority ? { priority } : {}),
+      ...(createdAtFilter ? { createdAt: createdAtFilter } : {}),
+    }
+
+    if (q && typeof q === 'string' && q.trim()) {
+      const search = q.trim().slice(0, 100)
+      const isObjectId = mongoose.isObjectIdOrHexString(search)
+      const regex = new RegExp(escapeRegex(search), 'i')
+      if (isObjectId) {
+        filter.$or = [
+          { _id: new mongoose.Types.ObjectId(search) },
+          { idempotencyKey: search },
+          { type: regex },
+        ]
+      } else {
+        filter.$or = [
+          { idempotencyKey: regex },
+          { type: regex },
+        ]
+      }
     }
     try {
       const [jobs, total] = await Promise.all([
@@ -560,6 +613,87 @@ export function createJobsRouter(
           )
         }
       }
+      handleUnexpectedError(response, error)
+    }
+  })
+
+  router.post('/:id/retry', async (request, response) => {
+    const { id } = request.params
+    if (!mongoose.isObjectIdOrHexString(id)) {
+      sendError(response, 400, 'INVALID_JOB_ID', 'id must be a valid MongoDB ObjectId.')
+      return
+    }
+
+    try {
+      const existingJob = await JobModel.findOne({
+        _id: id,
+        ownerId: request.authUser._id,
+      }).lean()
+      if (!existingJob) {
+        sendError(response, 404, 'JOB_NOT_FOUND', 'Job was not found.')
+        return
+      }
+
+      if (['pending', 'processing'].includes(existingJob.status)) {
+        sendError(
+          response,
+          409,
+          'JOB_NOT_RETRYABLE',
+          'Only non-active jobs (failed, dead, or completed) can be retried.',
+        )
+        return
+      }
+
+      const retryTime = new Date()
+      let runAt = retryTime
+      if (request.body?.runAt !== undefined) {
+        const parsed = typeof request.body.runAt === 'string' ? Date.parse(request.body.runAt) : NaN
+        if (Number.isFinite(parsed)) {
+          runAt = new Date(parsed)
+        }
+      }
+
+      const job = await JobModel.findOneAndUpdate(
+        {
+          _id: id,
+          ownerId: request.authUser._id,
+          status: { $nin: ['pending', 'processing'] },
+        },
+        {
+          $set: {
+            status: 'pending',
+            attempts: 0,
+            runAt,
+          },
+          $unset: {
+            workerId: 1,
+            claimToken: 1,
+            claimedAt: 1,
+            leaseExpiresAt: 1,
+            completedAt: 1,
+            deadAt: 1,
+            progress: 1,
+          },
+          $push: {
+            replayHistory: {
+              replayedAt: retryTime,
+              previousAttempts: existingJob.attempts ?? 0,
+              previousLastError: existingJob.lastError || 'Manual retry requested by operator',
+            },
+          },
+          $inc: { replayCount: 1 },
+        },
+        { new: true, runValidators: true },
+      ).lean()
+
+      if (!job) {
+        sendError(response, 409, 'JOB_NOT_RETRYABLE', 'Job state changed concurrently.')
+        return
+      }
+
+      await publishJobEvent('job:retried', job, eventPublisher)
+      response.json({ success: true, data: { retried: true, job } })
+    } catch (error) {
       handleUnexpectedError(response, error)
     }
   })

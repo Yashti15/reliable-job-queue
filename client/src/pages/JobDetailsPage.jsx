@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
-import { getApiErrorMessage, getJob, getArtifactDownloadUrl } from '../api/jobs.js'
-import { AppLink } from '../components/AppLink.jsx'
+import { cancelJob, getApiErrorMessage, getJob, getArtifactDownloadUrl, retryJob } from '../api/jobs.js'
+import { AppLink, navigate } from '../components/AppLink.jsx'
 import { ErrorState, LoadingState } from '../components/Feedback.jsx'
 import { formatDate } from '../components/JobTable.jsx'
 import { PageHeader } from '../components/PageHeader.jsx'
@@ -22,6 +22,8 @@ export function JobDetailsPage({ jobId }) {
   const [job, setJob] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [actionNotice, setActionNotice] = useState('')
+  const [actionLoading, setActionLoading] = useState(false)
   const [copied, setCopied] = useState(false)
 
   const loadJob = useCallback(async () => {
@@ -51,16 +53,85 @@ export function JobDetailsPage({ jobId }) {
     }
   }
 
+  async function handleCancel() {
+    if (!window.confirm(`Cancel pending job ${job._id}? This removes it from the queue.`)) return
+    setActionLoading(true)
+    setActionNotice('')
+    try {
+      await cancelJob(job._id)
+      setActionNotice('Job was cancelled successfully.')
+      await loadJob()
+    } catch (requestError) {
+      setError(getApiErrorMessage(requestError))
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
+  async function handleRetry() {
+    if (!window.confirm(`Retry job ${job._id}? It will be scheduled for immediate execution.`)) return
+    setActionLoading(true)
+    setActionNotice('')
+    try {
+      await retryJob(job._id)
+      setActionNotice('Job was successfully queued for retry.')
+      await loadJob()
+    } catch (requestError) {
+      setError(getApiErrorMessage(requestError))
+    } finally {
+      setActionLoading(false)
+    }
+  }
+
   return (
     <>
       <PageHeader
         eyebrow="Job record"
         title="Job details"
         description="Inspect the persisted job input, lifecycle timestamps, worker lease, and dead-letter audit history."
-        action={<AppLink href="/jobs" className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 shadow-sm hover:bg-slate-50">← <span className="ml-1">Back to jobs</span></AppLink>}
+        action={
+          <div className="flex items-center gap-2">
+            <AppLink
+              href="/jobs"
+              className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 shadow-sm hover:bg-slate-50"
+            >
+              ← <span className="ml-1">Back to jobs</span>
+            </AppLink>
+            {job?.status === 'pending' && (
+              <button
+                type="button"
+                disabled={actionLoading}
+                onClick={handleCancel}
+                className="rounded-xl border border-rose-200 bg-white px-4 py-2.5 text-sm font-semibold text-rose-700 shadow-sm hover:bg-rose-50 disabled:opacity-50"
+              >
+                {actionLoading ? 'Cancelling…' : 'Cancel job'}
+              </button>
+            )}
+            {job && ['failed', 'dead', 'completed'].includes(job.status) && (
+              <button
+                type="button"
+                disabled={actionLoading}
+                onClick={handleRetry}
+                className="rounded-xl bg-indigo-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-indigo-700 disabled:opacity-50"
+              >
+                {actionLoading ? 'Retrying…' : 'Retry job'}
+              </button>
+            )}
+          </div>
+        }
       />
 
-      {loading ? <LoadingState label="Loading job details" /> : error ? <ErrorState message={error} onRetry={loadJob} /> : job ? (
+      {actionNotice && (
+        <p role="status" className="mb-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
+          {actionNotice}
+        </p>
+      )}
+
+      {loading ? (
+        <LoadingState label="Loading job details" />
+      ) : error ? (
+        <ErrorState message={error} onRetry={loadJob} />
+      ) : job ? (
         <div className="grid gap-5 xl:grid-cols-[minmax(0,1.3fr)_minmax(300px,0.7fr)]">
           <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm shadow-slate-200/40 md:p-7">
             <div className="flex flex-wrap items-start justify-between gap-3 border-b border-slate-100 pb-5">
@@ -68,8 +139,41 @@ export function JobDetailsPage({ jobId }) {
                 <p className="text-xs font-semibold uppercase tracking-wide text-slate-400">Queue record</p>
                 <h2 className="mt-1 break-all font-mono text-sm font-semibold text-slate-800">{job._id}</h2>
               </div>
-              <button type="button" onClick={copyId} className="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50">{copied ? 'Copied' : 'Copy ID'}</button>
+              <button
+                type="button"
+                onClick={copyId}
+                className="rounded-lg border border-slate-200 px-3 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50"
+              >
+                {copied ? 'Copied' : 'Copy ID'}
+              </button>
             </div>
+
+            {/* Live Progress Bar for Processing Jobs */}
+            {job.status === 'processing' && (
+              <div className="my-5 rounded-xl border border-sky-200 bg-sky-50/70 p-4">
+                <div className="flex items-center justify-between text-xs font-semibold text-sky-900">
+                  <span className="flex items-center gap-1.5">
+                    <span className="size-2 animate-ping rounded-full bg-sky-500" />
+                    <span>Processing in progress</span>
+                    {job.progress?.stage && (
+                      <span className="rounded bg-sky-200 px-2 py-0.5 text-[11px] font-mono uppercase text-sky-800">
+                        {job.progress.stage}
+                      </span>
+                    )}
+                  </span>
+                  <span>{job.progress?.percent ?? 0}%</span>
+                </div>
+                <div className="mt-2.5 h-2 w-full overflow-hidden rounded-full bg-sky-200">
+                  <div
+                    className="h-full rounded-full bg-sky-600 transition-all duration-300"
+                    style={{ width: `${Math.max(5, job.progress?.percent ?? 0)}%` }}
+                  />
+                </div>
+                {job.progress?.message && (
+                  <p className="mt-2 text-xs text-sky-800">{job.progress.message}</p>
+                )}
+              </div>
+            )}
 
             <dl className="grid gap-x-8 sm:grid-cols-2">
               <Detail label="Status"><StatusBadge status={job.status} /></Detail>
@@ -88,7 +192,9 @@ export function JobDetailsPage({ jobId }) {
               <Detail label="Replay count">{job.replayCount}</Detail>
               {job.lastError && (
                 <div className="sm:col-span-2">
-                  <Detail label="Last error">{job.lastError}</Detail>
+                  <Detail label="Last error">
+                    <span className="font-mono text-xs text-rose-700">{job.lastError}</span>
+                  </Detail>
                 </div>
               )}
             </dl>
@@ -140,8 +246,47 @@ export function JobDetailsPage({ jobId }) {
           </section>
 
           <aside className="space-y-5">
+            {/* Attempt History */}
             <section className="rounded-2xl border border-slate-200 bg-white p-5">
-              <h3 className="font-semibold text-slate-900">Replay history</h3>
+              <h3 className="font-semibold text-slate-900">Attempt history</h3>
+              {job.attemptHistory?.length ? (
+                <ol className="mt-4 space-y-4">
+                  {[...job.attemptHistory].reverse().map((attempt) => (
+                    <li key={`attempt-${attempt.attempt}`} className="border-l-2 border-indigo-300 pl-3">
+                      <div className="flex items-center justify-between">
+                        <span className="text-xs font-semibold text-slate-800">
+                          Attempt {attempt.attempt}
+                        </span>
+                        {attempt.durationMs !== undefined && (
+                          <span className="text-[11px] text-slate-400 font-mono">
+                            {attempt.durationMs} ms
+                          </span>
+                        )}
+                      </div>
+                      <p className="mt-1 text-xs text-slate-500">
+                        {formatDate(attempt.startedAt)}
+                        {attempt.workerId && <span className="ml-1 font-mono">· {attempt.workerId}</span>}
+                      </p>
+                      {attempt.error && (
+                        <p className="mt-1 text-xs leading-5 text-rose-700 font-mono">
+                          {attempt.error}
+                        </p>
+                      )}
+                    </li>
+                  ))}
+                </ol>
+              ) : (
+                <p className="mt-2 text-sm text-slate-500">
+                  {job.attempts > 0
+                    ? `${job.attempts} attempt(s) recorded.`
+                    : 'No attempts have run yet.'}
+                </p>
+              )}
+            </section>
+
+            {/* Replay History */}
+            <section className="rounded-2xl border border-slate-200 bg-white p-5">
+              <h3 className="font-semibold text-slate-900">Replay / retry history</h3>
               {job.replayHistory?.length ? (
                 <ol className="mt-4 space-y-4">
                   {[...job.replayHistory].reverse().map((entry, index) => (
@@ -157,6 +302,7 @@ export function JobDetailsPage({ jobId }) {
                 <p className="mt-2 text-sm text-slate-500">No replay actions recorded.</p>
               )}
             </section>
+
             {job.status === 'dead' && (
               <div className="rounded-2xl border border-rose-100 bg-rose-50 p-5">
                 <p className="text-sm font-semibold text-rose-900">This job is in the dead-letter queue.</p>

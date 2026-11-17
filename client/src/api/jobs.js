@@ -104,12 +104,35 @@ export function getWorkers() {
   return api.get('/workers')
 }
 
-export function getJobs({ page = 1, limit = 10, status } = {}) {
-  return api.get('/jobs', { params: { page, limit, ...(status ? { status } : {}) } })
+export function getJobs({
+  page = 1,
+  limit = 10,
+  status,
+  type,
+  priority,
+  q,
+  startDate,
+  endDate,
+} = {}) {
+  const params = {
+    page,
+    limit,
+    ...(status ? { status } : {}),
+    ...(type ? { type } : {}),
+    ...(priority ? { priority } : {}),
+    ...(q ? { q } : {}),
+    ...(startDate ? { startDate } : {}),
+    ...(endDate ? { endDate } : {}),
+  }
+  return api.get('/jobs', { params })
 }
 
 export function getJob(jobId) {
   return api.get(`/jobs/${encodeURIComponent(jobId)}`)
+}
+
+export function retryJob(jobId, data) {
+  return api.post(`/jobs/${encodeURIComponent(jobId)}/retry`, data)
 }
 
 export function createJob(job) {

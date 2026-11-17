@@ -97,10 +97,44 @@ class FakeJob {
     return job
   }
 
+  static matchesFilter(job, filter) {
+    for (const [key, value] of Object.entries(filter)) {
+      if (key === '$or') {
+        const matchesOr = value.some((condition) => FakeJob.matchesFilter(job, condition))
+        if (!matchesOr) return false
+        continue
+      }
+      if (key === 'ownerId') {
+        if (String(job.ownerId) !== String(value)) return false
+        continue
+      }
+      if (key === '_id') {
+        if (String(job._id) !== String(value)) return false
+        continue
+      }
+      if (value && typeof value === 'object' && !(value instanceof Date) && !(value instanceof RegExp)) {
+        if (value.$nin && value.$nin.includes(job[key])) return false
+        if (value.$regex !== undefined) {
+          const r = value.$regex instanceof RegExp ? value.$regex : new RegExp(value.$regex, value.$options)
+          if (!r.test(String(job[key] ?? ''))) return false
+        }
+        if (value.$gte !== undefined && !(job[key] >= value.$gte)) return false
+        if (value.$lte !== undefined && !(job[key] <= value.$lte)) return false
+        continue
+      }
+      if (value instanceof RegExp) {
+        if (!value.test(String(job[key] ?? ''))) return false
+        continue
+      }
+      if (job[key] !== value) return false
+    }
+    return true
+  }
+
   static find(filter) {
     return new FakeQuery(() => {
       const jobs = [...FakeJob.documents.values()].filter((job) =>
-        Object.entries(filter).every(([key, value]) => job[key] === value),
+        FakeJob.matchesFilter(job, filter),
       )
       return jobs
     })
@@ -109,7 +143,7 @@ class FakeJob {
   static countDocuments(filter) {
     return Promise.resolve(
       [...FakeJob.documents.values()].filter((job) =>
-        Object.entries(filter).every(([key, value]) => job[key] === value),
+        FakeJob.matchesFilter(job, filter),
       ).length,
     )
   }
@@ -121,15 +155,7 @@ class FakeJob {
   static findOne(filter) {
     return new FakeQuery(() => {
       const job = FakeJob.documents.get(String(filter._id))
-      return job &&
-        Object.entries(filter).every(([field, value]) => {
-          if (job[field] instanceof mongoose.Types.ObjectId) {
-            return job[field].equals(value)
-          }
-          return job[field] === value
-        })
-        ? job
-        : null
+      return job && FakeJob.matchesFilter(job, filter) ? job : null
     })
   }
 
@@ -151,15 +177,7 @@ class FakeJob {
   static findOneAndUpdate(filter, update) {
     return new FakeQuery(() => {
       const job = FakeJob.documents.get(String(filter._id))
-      if (
-        !job ||
-        Object.entries(filter).some(([field, value]) => {
-          if (job[field] instanceof Date && value instanceof Date) {
-            return job[field].getTime() !== value.getTime()
-          }
-          return job[field] !== value
-        })
-      ) {
+      if (!job || !FakeJob.matchesFilter(job, filter)) {
         return null
       }
 
@@ -442,4 +460,83 @@ test('DELETE /api/jobs/:id cancels only pending jobs', async () => {
     assert.equal((await response.json()).error.code, 'JOB_NOT_CANCELLABLE')
     assert.equal(FakeJob.documents.has(job._id), true)
   }
+})
+
+test('GET /api/jobs supports search by text, type, priority, and date range', async () => {
+  FakeJob.documents.clear()
+  const d1 = new Date('2025-01-01T10:00:00Z')
+  const d2 = new Date('2025-01-05T10:00:00Z')
+  const d3 = new Date('2025-01-10T10:00:00Z')
+
+  const j1 = FakeJob.seed({ type: 'generate_pdf', priority: 'high', createdAt: d1, idempotencyKey: 'invoice-101' })
+  const j2 = FakeJob.seed({ type: 'process_image', priority: 'normal', createdAt: d2, idempotencyKey: 'avatar-user-5' })
+  const j3 = FakeJob.seed({ type: 'send_email', priority: 'low', createdAt: d3 })
+
+  // 1. Search by type
+  const searchTypeRes = await fetch(`${baseUrl}/api/jobs?q=pdf`)
+  assert.equal(searchTypeRes.status, 200)
+  const searchTypeData = await searchTypeRes.json()
+  assert.equal(searchTypeData.data.jobs.length, 1)
+  assert.equal(searchTypeData.data.jobs[0]._id, j1._id)
+
+  // 2. Search by idempotencyKey
+  const searchKeyRes = await fetch(`${baseUrl}/api/jobs?q=avatar`)
+  assert.equal(searchKeyRes.status, 200)
+  const searchKeyData = await searchKeyRes.json()
+  assert.equal(searchKeyData.data.jobs.length, 1)
+  assert.equal(searchKeyData.data.jobs[0]._id, j2._id)
+
+  // 3. Search by exact ObjectId
+  const searchIdRes = await fetch(`${baseUrl}/api/jobs?q=${j3._id}`)
+  assert.equal(searchIdRes.status, 200)
+  const searchIdData = await searchIdRes.json()
+  assert.equal(searchIdData.data.jobs.length, 1)
+  assert.equal(searchIdData.data.jobs[0]._id, j3._id)
+
+  // 4. Filter by priority
+  const prioRes = await fetch(`${baseUrl}/api/jobs?priority=high`)
+  assert.equal(prioRes.status, 200)
+  const prioData = await prioRes.json()
+  assert.equal(prioData.data.jobs.length, 1)
+  assert.equal(prioData.data.jobs[0].priority, 'high')
+
+  // 5. Filter by type
+  const typeRes = await fetch(`${baseUrl}/api/jobs?type=send_email`)
+  assert.equal(typeRes.status, 200)
+  const typeData = await typeRes.json()
+  assert.equal(typeData.data.jobs.length, 1)
+  assert.equal(typeData.data.jobs[0].type, 'send_email')
+
+  // 6. Filter by date range
+  const dateRes = await fetch(`${baseUrl}/api/jobs?startDate=2025-01-04T00:00:00Z&endDate=2025-01-06T00:00:00Z`)
+  assert.equal(dateRes.status, 200)
+  const dateData = await dateRes.json()
+  assert.equal(dateData.data.jobs.length, 1)
+  assert.equal(dateData.data.jobs[0]._id, j2._id)
+})
+
+test('POST /api/jobs/:id/retry retries non-active jobs, resets attempts, and prevents retrying pending/processing jobs', async () => {
+  FakeJob.documents.clear()
+  const failedJob = FakeJob.seed({
+    status: 'failed',
+    attempts: 2,
+    lastError: 'Temporary network failure',
+  })
+
+  // Retry failed job
+  const retryRes = await fetch(`${baseUrl}/api/jobs/${failedJob._id}/retry`, { method: 'POST' })
+  assert.equal(retryRes.status, 200)
+  const retryBody = await retryRes.json()
+  assert.equal(retryBody.success, true)
+  assert.equal(retryBody.data.retried, true)
+  assert.equal(retryBody.data.job.status, 'pending')
+  assert.equal(retryBody.data.job.attempts, 0)
+  assert.equal(retryBody.data.job.replayCount, 1)
+  assert.equal(retryBody.data.job.replayHistory.length, 1)
+
+  // Retrying pending job should fail (409)
+  const pendingRetryRes = await fetch(`${baseUrl}/api/jobs/${failedJob._id}/retry`, { method: 'POST' })
+  assert.equal(pendingRetryRes.status, 409)
+  const pendingError = await pendingRetryRes.json()
+  assert.equal(pendingError.error.code, 'JOB_NOT_RETRYABLE')
 })
