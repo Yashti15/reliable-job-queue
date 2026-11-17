@@ -5,6 +5,7 @@ import { ErrorState } from '../components/Feedback.jsx'
 import { JobsPanel } from '../components/JobsPanel.jsx'
 import { PageHeader } from '../components/PageHeader.jsx'
 import { useQueueRealtime } from '../realtime/RealtimeProvider.jsx'
+import { useToast } from '../components/Toast.jsx'
 
 const statuses = ['', 'pending', 'processing', 'completed', 'failed', 'dead']
 const priorities = ['', 'high', 'normal', 'low']
@@ -24,6 +25,7 @@ export function JobsPage({ search }) {
     : ''
   const searchQuery = query.get('q') || ''
   const page = Number(query.get('page')) || 1
+  const { showToast } = useToast()
 
   const [data, setData] = useState({ jobs: [], pagination: null })
   const [loading, setLoading] = useState(true)
@@ -31,7 +33,6 @@ export function JobsPage({ search }) {
   const [searchInput, setSearchInput] = useState(searchQuery)
   const [cancellingId, setCancellingId] = useState('')
   const [retryingId, setRetryingId] = useState('')
-  const [notice, setNotice] = useState('')
 
   // Sync search input if URL changes externally
   useEffect(() => {
@@ -97,14 +98,12 @@ export function JobsPage({ search }) {
   async function handleCancel(job) {
     if (!window.confirm(`Cancel pending job ${job._id}? This removes it from the queue.`)) return
     setCancellingId(job._id)
-    setNotice('')
-    setError('')
     try {
       await cancelJob(job._id)
-      setNotice('Job cancelled successfully.')
+      showToast('Job cancelled successfully.', 'success')
       await loadJobs()
     } catch (requestError) {
-      setError(getApiErrorMessage(requestError))
+      showToast(getApiErrorMessage(requestError), 'error')
     } finally {
       setCancellingId('')
     }
@@ -113,14 +112,12 @@ export function JobsPage({ search }) {
   async function handleRetry(job) {
     if (!window.confirm(`Retry job ${job._id}? Its attempts will reset and it will return to the pending queue.`)) return
     setRetryingId(job._id)
-    setNotice('')
-    setError('')
     try {
       await retryJob(job._id)
-      setNotice(`Job ${job._id} was queued for retry.`)
+      showToast(`Job ${job._id} was queued for retry.`, 'success')
       await loadJobs()
     } catch (requestError) {
-      setError(getApiErrorMessage(requestError))
+      showToast(getApiErrorMessage(requestError), 'error')
     } finally {
       setRetryingId('')
     }
@@ -145,11 +142,6 @@ export function JobsPage({ search }) {
         }
       />
 
-      {notice && (
-        <p role="status" className="mb-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
-          {notice}
-        </p>
-      )}
       {error && (
         <div className="mb-4">
           <ErrorState message={error} onRetry={loadJobs} />

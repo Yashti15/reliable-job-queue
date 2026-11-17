@@ -1,21 +1,22 @@
 import { useCallback, useEffect, useState } from 'react'
 import { getApiErrorMessage, getDeadJobs, replayJob } from '../api/jobs.js'
 import { navigate } from '../components/AppLink.jsx'
-import { EmptyState, ErrorState, LoadingState } from '../components/Feedback.jsx'
+import { EmptyState, ErrorState, SkeletonTable } from '../components/Feedback.jsx'
 import { formatDate } from '../components/JobTable.jsx'
 import { Pagination } from '../components/Pagination.jsx'
 import { PageHeader } from '../components/PageHeader.jsx'
 import { useQueueRealtime } from '../realtime/RealtimeProvider.jsx'
+import { useToast } from '../components/Toast.jsx'
 
 export function DeadJobsPage() {
   const { jobRefreshVersion } = useQueueRealtime()
+  const { showToast } = useToast()
   const [page, setPage] = useState(1)
   const [jobs, setJobs] = useState([])
   const [pagination, setPagination] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [replayingId, setReplayingId] = useState('')
-  const [notice, setNotice] = useState('')
 
   const loadDeadJobs = useCallback(async () => {
     setLoading(true)
@@ -40,14 +41,12 @@ export function DeadJobsPage() {
       return
     }
     setReplayingId(job._id)
-    setNotice('')
-    setError('')
     try {
       await replayJob(job._id)
-      setNotice(`Job ${job._id} was replayed and returned to the pending queue.`)
+      showToast(`Job ${job._id} was replayed and returned to the pending queue.`, 'success')
       await loadDeadJobs()
     } catch (requestError) {
-      setError(getApiErrorMessage(requestError))
+      showToast(getApiErrorMessage(requestError), 'error')
     } finally {
       setReplayingId('')
     }
@@ -61,11 +60,10 @@ export function DeadJobsPage() {
         description="Review jobs that exhausted their attempts. Replay returns a job to normal scheduling and records an audit entry."
         action={<button type="button" onClick={loadDeadJobs} className="rounded-xl border border-slate-200 bg-white px-4 py-2.5 text-sm font-semibold text-slate-700 shadow-sm hover:bg-slate-50">↻ <span className="ml-1">Refresh</span></button>}
       />
-      {notice && <p role="status" className="mb-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">{notice}</p>}
       {error && <div className="mb-4"><ErrorState message={error} onRetry={loadDeadJobs} /></div>}
 
       {loading ? (
-        <LoadingState label="Loading dead-letter jobs" />
+        <SkeletonTable rows={5} />
       ) : error ? null : jobs.length === 0 ? (
         <EmptyState title="No dead jobs" description="Jobs that exhaust their retry or crash-recovery attempt limit will appear here." />
       ) : (

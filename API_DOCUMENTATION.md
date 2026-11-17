@@ -132,9 +132,16 @@ This key deduplicates job creation only. It does not ensure the handler's extern
 
 ### `GET /api/jobs`
 
-Lists jobs ordered newest first. `page` defaults to `1`, `limit` defaults to `20` (maximum `100`), and `status` is optional.
+Lists jobs ordered newest first. Supports search, filtering, and pagination:
+- `page` (default `1`)
+- `limit` (default `20`, maximum `100`)
+- `status` (optional: `pending`, `processing`, `completed`, `failed`, `dead`)
+- `type` (optional: `generate_pdf`, `process_image`, `send_email`)
+- `priority` (optional: `high`, `normal`, `low`)
+- `q` (optional: case-insensitive text search matching MongoDB ObjectId, idempotency key, or job type; sanitized against ReDoS)
+- `startDate` & `endDate` (optional: ISO-8601 date range filters on `createdAt`)
 
-Example: `GET /api/jobs?page=1&limit=20&status=pending`
+Example: `GET /api/jobs?page=1&limit=20&status=failed&priority=high&type=generate_pdf`
 
 Returns `200 OK`:
 
@@ -148,7 +155,7 @@ Returns `200 OK`:
 }
 ```
 
-Invalid pagination or status returns `400`.
+Invalid pagination, dates, or status return `400`.
 
 ### `GET /api/jobs/:id`
 
@@ -201,6 +208,26 @@ Returns `200 OK`:
 
 Only a `dead` job can be replayed. A malformed ID returns `400 INVALID_JOB_ID`, missing job returns `404 JOB_NOT_FOUND`, and non-dead or already concurrently replayed jobs return `409 JOB_NOT_REPLAYABLE`. Invalid replay bodies or non-future `runAt` values return `400`. Replay is one conditional database update: status changes only once, attempts reset to zero, `runAt` is set, and previous worker/lease/token fields are cleared. Type, payload, idempotency key, and final error are retained. The audit history stores prior attempts/error and replay time and is capped to 20 entries.
 
+### `POST /api/jobs/:id/retry`
+
+Manually schedules a non-active job (`failed`, `dead`, or `completed`) for immediate retry.
+Prevents retrying pending or processing jobs (`409 JOB_NOT_RETRYABLE`).
+Resets status to `pending`, clears error, progress, and worker claim, appends to `replayHistory`, and publishes `job:retried`.
+
+```json
+{
+  "success": true,
+  "data": {
+    "retried": true,
+    "job": {
+      "_id": "6735a1b2c3d4e5f678901234",
+      "status": "pending",
+      "attempts": 0
+    }
+  }
+}
+```
+
 ### `DELETE /api/jobs/:id`
 
 Cancels a pending job by deleting its record. The conditional delete matches both the ID and `status: "pending"`. Returns `200 OK` with `{ "success": true, "data": { "cancelled": true, "job": {} } }`. Returns `409 JOB_NOT_CANCELLABLE` for processing/completed/other non-pending jobs, or `404` when the ID does not exist. This API does not introduce a `cancelled` status.
@@ -232,13 +259,28 @@ Returns an aggregation for jobs created in the preceding 30 days:
       "failureRate": 11.1
     },
     "averageExecutionDurationMs": 830,
+    "byType": [
+      { "type": "generate_pdf", "count": 20 },
+      { "type": "process_image", "count": 15 },
+      { "type": "send_email", "count": 7 }
+    ],
+    "byPriority": [
+      { "priority": "high", "count": 10 },
+      { "priority": "normal", "count": 28 },
+      { "priority": "low", "count": 4 }
+    ],
+    "dailyTrend": [
+      { "date": "2026-11-10", "count": 5 },
+      { "date": "2026-11-11", "count": 8 },
+      { "date": "2026-11-12", "count": 12 }
+    ],
     "generatedAt": "2026-11-14T08:00:00.000Z",
     "windowStart": "2026-10-15T08:00:00.000Z"
   }
 }
 ```
 
-Status counts are the current status of in-window jobs, not historical transition totals. Rates use terminal jobs only: success is `completed / (completed + failed + dead)`; failure is `(failed + dead) / terminal total`. Both rates are zero if there are no terminal jobs. Average duration is the arithmetic mean of `completedAt - claimedAt` for completed jobs with both timestamps and is `null` when no valid samples exist. This endpoint does not provide historical trends.
+Status counts are the current status of in-window jobs, not historical transition totals. Rates use terminal jobs only: success is `completed / (completed + failed + dead)`; failure is `(failed + dead) / terminal total`. Both rates are zero if there are no terminal jobs. Average duration is the arithmetic mean of `completedAt - claimedAt` for completed jobs with both timestamps and is `null` when no valid samples exist. `byType` and `byPriority` provide distribution breakdowns, and `dailyTrend` provides activity volume by day across the window. Computed in a single `$facet` pipeline.
 
 ## Worker monitoring
 
@@ -277,11 +319,13 @@ Returns at most 100 records, newest `lastSeenAt` first. State is derived from th
 
 ## Socket.IO notifications
 
-Connect a Socket.IO client to the API origin (the `VITE_API_BASE_URL` host when configured) and include the session cookie. The development Vite server proxies `/socket.io` to port 5000. `CLIENT_ORIGIN` is a comma-separated exact-origin allowlist; when omitted, localhost and 127.0.0.1 origins are accepted. The handshake validates the JWT and current user; room membership is assigned by the server and clients cannot select another tenant's room. Sockets are disconnected when the token expires.
+Connect a Socket.IO client using either standard session cookies (in local/monolithic environments) or a short-lived socket ticket acquired via `GET /api/auth/socket-token` passed in `auth: { token }` during connection handshake (for decoupled production deployments such as Vercel + Render where WebSocket cookie proxying is unsupported).
+
+Tickets have a 60-second validity window, contain user identification with `token_type: "socket_ticket"`, and cannot be exchanged for REST sessions. The handshake validates the ticket/JWT and identifies the tenant; room membership is assigned by the server and clients cannot select another tenant's room.
 
 Events:
 
-- `job:created`, `job:claimed`, `job:completed`, `job:failed`, `job:retried`, `job:dead`, `job:replayed`, `job:cancelled`
+- `job:created`, `job:claimed`, `job:progress`, `job:completed`, `job:failed`, `job:retried`, `job:dead`, `job:replayed`, `job:cancelled`
 - `worker:updated`, `worker:heartbeat`
 
 Job event example (fields are included when available):

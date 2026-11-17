@@ -1,10 +1,112 @@
-# Reliable Job Queue with Dead-Letter Recovery
+# QueueOps — Reliable Job Queue with Dead-Letter Recovery
 
-A learning project for building a reliable background job queue with MongoDB atomic operations. Queue mechanics are implemented incrementally in this project; it does not use BullMQ or another ready-made queue library.
+QueueOps is a production-grade, multi-tenant asynchronous background job processing platform built with Node.js, Express, React, Vite, and MongoDB Atlas.
 
-## Current status
+Queue mechanics are implemented from first principles using MongoDB atomic conditional operations, distributed worker leases, exponential backoff retries with jitter, dead-letter queue (DLQ) isolation, replay audit history, live progress reporting, and multi-stage execution handlers (PDF generation, Sharp image processing, and transactional email).
 
-The project includes a React/Vite monitoring dashboard, Express API, MongoDB-backed job queue, atomic claiming, standalone workers, retries, leases, crash recovery, dead-letter handling, replay, Socket.IO lifecycle notifications, worker monitoring, and bounded operational analytics.
+---
+
+## Architecture Overview
+
+```mermaid
+graph TD
+    subgraph Client ["Client Application (React + Vite)"]
+        UI["QueueOps UI"]
+        SocketClient["Socket.IO Client"]
+    end
+
+    subgraph Edge ["Edge Proxy (Vercel)"]
+        VercelProxy["Vercel Proxy / Rewrites (/api/*)"]
+    end
+
+    subgraph Compute ["Backend & Workers (Render / Node.js)"]
+        ExpressAPI["Express API Server (Trust Proxy: 1)"]
+        AuthMiddleware["Auth & Rate Limiters (CSRF + Session)"]
+        EventBridge["Real-time Event Bridge (Polling queue_events)"]
+        SocketServer["Socket.IO Server (Ticket Auth)"]
+        BackgroundWorker["Standalone Background Worker Processes"]
+    end
+
+    subgraph Data ["Database (MongoDB Atlas M0 Free Cluster)"]
+        JobsColl[("jobs Collection (Compound Indexes & Lease Fields)")]
+        EventsColl[("queue_events Collection (TTL: 24h)")]
+        WorkersColl[("workers Collection (Heartbeat Registry)")]
+    end
+
+    subgraph Handlers ["Execution Handlers"]
+        PDF["PDF Generator (PDFKit)"]
+        ImageProc["Image Processor (Sharp)"]
+        Email["Email Delivery (Resend / Mock Demo)"]
+    end
+
+    UI -->|"HTTP API (Cookie / CSRF)"| VercelProxy
+    VercelProxy -->|"Proxy Hop"| ExpressAPI
+    UI -->|"Direct Socket Ticket Handshake"| SocketServer
+    ExpressAPI --> AuthMiddleware
+    ExpressAPI -->|"Atomic Conditional Claim / Inserts"| JobsColl
+    EventBridge -->|"Polls Event Stream"| EventsColl
+    EventBridge -->|"User-Isolated Rooms"| SocketServer
+    SocketServer -->|"Push Lifecycle Events"| SocketClient
+
+    BackgroundWorker -->|"Atomic findOneAndUpdate Lease Claim"| JobsColl
+    BackgroundWorker -->|"Heartbeat Every 10s"| WorkersColl
+    BackgroundWorker -->|"Emit Lifecycle Updates"| EventsColl
+    BackgroundWorker --> Handlers
+```
+
+---
+
+## Job Lifecycle State Machine
+
+```mermaid
+stateDiagram-v2
+    [*] --> Pending : Submit Job (Idempotency Safe)
+    Pending --> Processing : Atomic Lease Claim (workerId, claimToken, leaseExpiresAt)
+    Pending --> Cancelled : DELETE /api/jobs/:id (Atomic Delete)
+    
+    Processing --> Processing : Heartbeat Renewal / Progress Reporting (Stage & %)
+    
+    Processing --> Completed : Handler Success (Result & Artifact Saved)
+    Processing --> Pending : Handler Error (attempts < maxAttempts, Exponential Backoff + Jitter)
+    Processing --> Dead : Handler Error (attempts >= maxAttempts)
+    Processing --> Pending : Worker Crash / Lease Expired (Reclaimed by next worker)
+    
+    Dead --> Pending : POST /api/jobs/:id/replay (Audit Recorded, Attempts Reset)
+    Failed --> Pending : POST /api/jobs/:id/retry (Manual Operator Retry)
+    Dead --> Pending : POST /api/jobs/:id/retry (Manual Operator Retry)
+    Completed --> Pending : POST /api/jobs/:id/retry (Manual Operator Re-execution)
+    
+    Completed --> [*]
+    Cancelled --> [*]
+```
+
+---
+
+## Core Technical Features
+
+1. **Atomic Concurrency Boundary**:
+   - Built on MongoDB's atomic `findOneAndUpdate` queries. Multiple concurrent workers can poll without duplicate execution or race conditions.
+   - Leases use unique `claimToken` UUIDs: if a worker loses its lease (e.g. temporary CPU throttle or network partition), it cannot renew, complete, or fail the job after another worker has reclaimed it.
+2. **Crash Recovery & Heartbeats**:
+   - Active workers emit a heartbeat every 10 seconds (`WORKER_HEARTBEAT_INTERVAL_MS`).
+   - Leases expire after 30 seconds (`WORKER_LEASE_DURATION_MS`). If a worker crashes abruptly without a graceful shutdown, another worker atomically reclaims the expired lease and continues processing.
+3. **Dead Letter Queue & Replay**:
+   - Jobs that exhaust their retry limit (`maxAttempts`) move to `dead` state with their full payload, error history, and `deadAt` timestamp.
+   - Operators can replay dead jobs via `POST /api/jobs/:id/replay`, which resets attempts, schedules immediate or delayed execution, and records a capped audit history.
+   - Manual retry via `POST /api/jobs/:id/retry` supports re-running failed, dead, or completed jobs.
+4. **Real-time Event Bridge & Socket Ticket Auth**:
+   - Multi-process communication between API and workers uses a MongoDB-backed `queue_events` collection with 24-hour TTL.
+   - Socket.IO handshakes use short-lived single-use tickets (`GET /api/auth/socket-token`) with tenant isolation, preventing WebSocket proxy disconnects in cross-origin production topologies.
+5. **Real Execution Handlers**:
+   - **PDF Generation**: Renders multi-section executive reports using PDFKit and stores output in private tenant-isolated storage.
+   - **Image Processing**: Resizes, optimizes, and generates thumbnails using Sharp with multi-stage progress reporting.
+   - **Transactional Email**: Integrates with Resend and features an honest `EMAIL_DEMO_MODE` for safe local testing without external provider charges.
+6. **High-Performance Aggregation Analytics**:
+   - Single-query `$facet` pipeline returns 30-day queue overview, terminal success/failure rates, job type distribution, priority distribution, and daily activity trends.
+7. **Free-Tier Optimized**:
+   - Tailored specifically to run completely within free infrastructure tiers: **Vercel** (Edge static/proxy frontend), **Render** (Node.js API & background worker), and **MongoDB Atlas M0** (512MB shared cluster).
+
+---
 
 ## Prerequisites
 

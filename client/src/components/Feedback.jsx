@@ -27,6 +27,40 @@ export function LoadingState({ label = 'Loading jobs' }) {
   )
 }
 
+export function SkeletonMetrics({ count = 4 }) {
+  return (
+    <div role="status" aria-label="Loading metrics" className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+      {Array.from({ length: count }).map((_, idx) => (
+        <div key={idx} className="animate-pulse rounded-2xl border border-slate-200 bg-white p-5 shadow-sm">
+          <div className="h-3.5 w-20 rounded-md bg-slate-200" />
+          <div className="mt-3 h-8 w-14 rounded-lg bg-slate-200" />
+          <div className="mt-2 h-3 w-28 rounded-md bg-slate-100" />
+        </div>
+      ))}
+    </div>
+  )
+}
+
+export function SkeletonTable({ rows = 5 }) {
+  return (
+    <div role="status" aria-label="Loading table data" className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm">
+      <div className="border-b border-slate-100 bg-slate-50/75 px-5 py-3.5">
+        <div className="h-4 w-32 animate-pulse rounded bg-slate-200" />
+      </div>
+      <div className="divide-y divide-slate-100">
+        {Array.from({ length: rows }).map((_, rIdx) => (
+          <div key={rIdx} className="flex items-center gap-4 px-5 py-4 animate-pulse">
+            <div className="h-4 w-28 rounded bg-slate-200" />
+            <div className="h-4 w-20 rounded bg-slate-100" />
+            <div className="h-4 flex-1 rounded bg-slate-100" />
+            <div className="h-6 w-16 rounded-full bg-slate-200" />
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 export function EmptyState({ title, description, action }) {
   return (
     <div className="rounded-2xl border border-dashed border-slate-300 bg-white px-6 py-14 text-center">

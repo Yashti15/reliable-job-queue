@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import React from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
-import { EmptyState, ErrorState, LoadingState } from './Feedback.jsx'
+import { EmptyState, ErrorState, LoadingState, SkeletonMetrics, SkeletonTable } from './Feedback.jsx'
 
 test('ErrorState renders alert role and error message', () => {
   const html = renderToStaticMarkup(
@@ -31,4 +31,22 @@ test('EmptyState renders title and description', () => {
   )
   assert.ok(html.includes('No pending jobs'))
   assert.ok(html.includes('Create a job to see it listed here.'))
+})
+
+test('SkeletonMetrics renders status role and pulse cards', () => {
+  const html = renderToStaticMarkup(
+    React.createElement(SkeletonMetrics, { count: 4 }),
+  )
+  assert.ok(html.includes('role="status"'))
+  assert.ok(html.includes('aria-label="Loading metrics"'))
+  assert.ok(html.includes('animate-pulse'))
+})
+
+test('SkeletonTable renders status role and shimmer rows', () => {
+  const html = renderToStaticMarkup(
+    React.createElement(SkeletonTable, { rows: 3 }),
+  )
+  assert.ok(html.includes('role="status"'))
+  assert.ok(html.includes('aria-label="Loading table data"'))
+  assert.ok(html.includes('animate-pulse'))
 })

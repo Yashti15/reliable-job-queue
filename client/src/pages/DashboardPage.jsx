@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useState } from 'react'
-import { getAnalytics, getApiErrorMessage, getJobs, getWorkers } from '../api/jobs.js'
+import { cancelJob, getAnalytics, getApiErrorMessage, getJobs, getWorkers, retryJob } from '../api/jobs.js'
 import { AppLink, navigate } from '../components/AppLink.jsx'
-import { ErrorState, LoadingState } from '../components/Feedback.jsx'
+import { ErrorState, SkeletonMetrics, SkeletonTable } from '../components/Feedback.jsx'
 import { formatDate, JobTable } from '../components/JobTable.jsx'
 import { PageHeader } from '../components/PageHeader.jsx'
 import { useQueueRealtime } from '../realtime/RealtimeProvider.jsx'
+import { useToast } from '../components/Toast.jsx'
 
 const metricCards = [
   { key: 'total', label: 'Total jobs · 30 days', tint: 'bg-indigo-50 text-indigo-700', status: '' },
@@ -16,13 +17,18 @@ const metricCards = [
 ]
 
 export function DashboardPage() {
+  const { showToast } = useToast()
   const [metrics, setMetrics] = useState(null)
   const [recentJobs, setRecentJobs] = useState([])
   const [terminal, setTerminal] = useState(null)
   const [workers, setWorkers] = useState(null)
+  const [byType, setByType] = useState([])
+  const [dailyTrend, setDailyTrend] = useState([])
   const [averageExecutionDurationMs, setAverageExecutionDurationMs] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
+  const [cancellingId, setCancellingId] = useState('')
+  const [retryingId, setRetryingId] = useState('')
   const { jobRefreshVersion, workerRefreshVersion } = useQueueRealtime()
 
   const loadDashboard = useCallback(async () => {
@@ -37,6 +43,8 @@ export function DashboardPage() {
       setMetrics(analytics.jobs)
       setTerminal(analytics.terminal)
       setAverageExecutionDurationMs(analytics.averageExecutionDurationMs)
+      setByType(analytics.byType || [])
+      setDailyTrend(analytics.dailyTrend || [])
       setWorkers(workersResponse.data.data)
       setRecentJobs(recentResponse.data.data.jobs)
     } catch (requestError) {
@@ -50,7 +58,36 @@ export function DashboardPage() {
     loadDashboard()
   }, [loadDashboard, jobRefreshVersion, workerRefreshVersion])
 
+  async function handleCancel(job) {
+    if (!window.confirm(`Cancel pending job ${job._id}?`)) return
+    setCancellingId(job._id)
+    try {
+      await cancelJob(job._id)
+      showToast('Job cancelled successfully.', 'success')
+      await loadDashboard()
+    } catch (err) {
+      showToast(getApiErrorMessage(err), 'error')
+    } finally {
+      setCancellingId('')
+    }
+  }
+
+  async function handleRetry(job) {
+    if (!window.confirm(`Retry job ${job._id}?`)) return
+    setRetryingId(job._id)
+    try {
+      await retryJob(job._id)
+      showToast(`Job ${job._id} was queued for retry.`, 'success')
+      await loadDashboard()
+    } catch (err) {
+      showToast(getApiErrorMessage(err), 'error')
+    } finally {
+      setRetryingId('')
+    }
+  }
+
   const workerCounts = workers?.counts || { active: 0, idle: 0, unresponsive: 0, disconnected: 0, total: 0 }
+  const totalVolume = metrics?.total || 1
 
   return (
     <>
@@ -72,7 +109,10 @@ export function DashboardPage() {
       {error ? (
         <ErrorState message={error} onRetry={loadDashboard} />
       ) : loading ? (
-        <LoadingState label="Loading dashboard metrics" />
+        <div className="space-y-6">
+          <SkeletonMetrics count={6} />
+          <SkeletonTable rows={4} />
+        </div>
       ) : (
         <>
           <section aria-label="Job metrics" className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
@@ -124,6 +164,34 @@ export function DashboardPage() {
                   </p>
                 </div>
               </div>
+
+              {/* Job Type Distribution Section */}
+              {byType.length > 0 && (
+                <div className="mt-6 border-t border-slate-100 pt-5">
+                  <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    Job Type Distribution
+                  </h3>
+                  <div className="mt-3 space-y-2.5">
+                    {byType.map((item) => {
+                      const pct = Math.round((item.count / totalVolume) * 100)
+                      return (
+                        <div key={item.type}>
+                          <div className="flex justify-between text-xs font-medium text-slate-700">
+                            <span className="font-mono">{item.type}</span>
+                            <span>{item.count} ({pct}%)</span>
+                          </div>
+                          <div className="mt-1 h-2 w-full overflow-hidden rounded-full bg-slate-100">
+                            <div
+                              className="h-full rounded-full bg-indigo-500 transition-all duration-300"
+                              style={{ width: `${Math.max(4, pct)}%` }}
+                            />
+                          </div>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm shadow-slate-200/40">
@@ -162,6 +230,36 @@ export function DashboardPage() {
               ) : (
                 <p className="mt-4 text-sm text-slate-500">No worker has registered yet. Start the worker process to see its heartbeat.</p>
               )}
+
+              {/* 7-Day Activity Trend */}
+              {dailyTrend.length > 0 && (
+                <div className="mt-6 border-t border-slate-100 pt-5">
+                  <h3 className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    Recent Activity Trend
+                  </h3>
+                  <div className="mt-3 flex items-end gap-1.5 h-20">
+                    {dailyTrend.map((day) => {
+                      const maxDaily = Math.max(...dailyTrend.map((d) => d.total), 1)
+                      const heightPct = Math.round((day.total / maxDaily) * 100)
+                      return (
+                        <div
+                          key={day._id}
+                          className="group relative flex-1 flex flex-col items-center h-full justify-end"
+                        >
+                          <div
+                            className="w-full rounded-t bg-indigo-500 hover:bg-indigo-600 transition"
+                            style={{ height: `${Math.max(10, heightPct)}%` }}
+                            title={`${day._id}: ${day.total} jobs (${day.completed} completed, ${day.failed} failed)`}
+                          />
+                          <span className="mt-1 text-[9px] text-slate-400 font-mono">
+                            {day._id.slice(5)}
+                          </span>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              )}
             </div>
           </section>
 
@@ -177,7 +275,13 @@ export function DashboardPage() {
             </div>
             {recentJobs.length ? (
               <div className="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-sm shadow-slate-200/40">
-                <JobTable jobs={recentJobs} />
+                <JobTable
+                  jobs={recentJobs}
+                  onCancel={handleCancel}
+                  cancellingId={cancellingId}
+                  onRetry={handleRetry}
+                  retryingId={retryingId}
+                />
                 <div className="border-t border-slate-100 px-5 py-3 text-xs text-slate-500">
                   Updated {formatDate(new Date())}
                 </div>

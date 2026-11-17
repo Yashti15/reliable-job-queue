@@ -6,6 +6,7 @@ import { formatDate } from '../components/JobTable.jsx'
 import { PageHeader } from '../components/PageHeader.jsx'
 import { StatusBadge } from '../components/StatusBadge.jsx'
 import { useQueueRealtime } from '../realtime/RealtimeProvider.jsx'
+import { useToast } from '../components/Toast.jsx'
 
 function Detail({ label, children, mono = false }) {
   if (children === undefined || children === null || children === '') return null
@@ -19,10 +20,10 @@ function Detail({ label, children, mono = false }) {
 
 export function JobDetailsPage({ jobId }) {
   const { jobRefreshVersion } = useQueueRealtime()
+  const { showToast } = useToast()
   const [job, setJob] = useState(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const [actionNotice, setActionNotice] = useState('')
   const [actionLoading, setActionLoading] = useState(false)
   const [copied, setCopied] = useState(false)
 
@@ -47,22 +48,22 @@ export function JobDetailsPage({ jobId }) {
     try {
       await navigator.clipboard.writeText(job._id)
       setCopied(true)
+      showToast('Job ID copied to clipboard.', 'info')
       window.setTimeout(() => setCopied(false), 1800)
     } catch {
-      setError('Could not copy the job ID. You can select and copy it manually.')
+      showToast('Could not copy the job ID to clipboard.', 'error')
     }
   }
 
   async function handleCancel() {
     if (!window.confirm(`Cancel pending job ${job._id}? This removes it from the queue.`)) return
     setActionLoading(true)
-    setActionNotice('')
     try {
       await cancelJob(job._id)
-      setActionNotice('Job was cancelled successfully.')
+      showToast('Job was cancelled successfully.', 'success')
       await loadJob()
     } catch (requestError) {
-      setError(getApiErrorMessage(requestError))
+      showToast(getApiErrorMessage(requestError), 'error')
     } finally {
       setActionLoading(false)
     }
@@ -71,13 +72,12 @@ export function JobDetailsPage({ jobId }) {
   async function handleRetry() {
     if (!window.confirm(`Retry job ${job._id}? It will be scheduled for immediate execution.`)) return
     setActionLoading(true)
-    setActionNotice('')
     try {
       await retryJob(job._id)
-      setActionNotice('Job was successfully queued for retry.')
+      showToast('Job was successfully queued for retry.', 'success')
       await loadJob()
     } catch (requestError) {
-      setError(getApiErrorMessage(requestError))
+      showToast(getApiErrorMessage(requestError), 'error')
     } finally {
       setActionLoading(false)
     }
@@ -120,12 +120,6 @@ export function JobDetailsPage({ jobId }) {
           </div>
         }
       />
-
-      {actionNotice && (
-        <p role="status" className="mb-4 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3 text-sm text-emerald-800">
-          {actionNotice}
-        </p>
-      )}
 
       {loading ? (
         <LoadingState label="Loading job details" />

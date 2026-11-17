@@ -8,6 +8,7 @@ import { JobDetailsPage } from './pages/JobDetailsPage.jsx'
 import { AppShell } from './components/AppShell.jsx'
 import { useQueueRealtime } from './realtime/RealtimeProvider.jsx'
 import { RealtimeProvider } from './realtime/RealtimeProvider.jsx'
+import { ToastProvider } from './components/Toast.jsx'
 import { AuthPage } from './pages/AuthPage.jsx'
 import { useAuth } from './auth/AuthProvider.jsx'
 
@@ -48,7 +49,9 @@ function DashboardApplication({ location, health, user, onLogout }) {
 
   return (
     <AppShell health={health} connectionState={connectionState} user={user} onLogout={onLogout}>
-      {page}
+      <ToastProvider>
+        {page}
+      </ToastProvider>
     </AppShell>
   )
 }

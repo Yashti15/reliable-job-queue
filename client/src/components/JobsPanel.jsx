@@ -1,5 +1,5 @@
 import { AppLink } from './AppLink.jsx'
-import { EmptyState, ErrorState, LoadingState } from './Feedback.jsx'
+import { EmptyState, ErrorState, SkeletonTable } from './Feedback.jsx'
 import { JobTable } from './JobTable.jsx'
 import { Pagination } from './Pagination.jsx'
 
@@ -17,7 +17,7 @@ export function JobsPanel({
   emptyTitle = 'No jobs found',
   emptyDescription = 'Jobs submitted to the queue will appear here.',
 }) {
-  if (loading) return <LoadingState />
+  if (loading) return <SkeletonTable rows={5} />
   if (error) return <ErrorState message={error} onRetry={onRetry} />
   if (!jobs.length) {
     return (
